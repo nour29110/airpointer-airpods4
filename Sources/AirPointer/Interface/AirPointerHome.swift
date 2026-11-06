@@ -566,7 +566,7 @@ private final class SettingsPage:NSObject {
         if screens.itemTitles != state.screens{screens.removeAllItems();screens.addItems(withTitles:state.screens)}
         if screens.itemArray.indices.contains(state.screen){screens.selectItem(at:state.screen)}
         screens.isEnabled=state.screens.count>1
-        let pairTitles=state.pairs.isEmpty ? ["No AirPods Pro found"]:state.pair<0 ? ["Choose your AirPods"]+state.pairs:state.pairs
+        let pairTitles=state.pairs.isEmpty ? ["No supported AirPods found"]:state.pair<0 ? ["Choose your AirPods"]+state.pairs:state.pairs
         if pairs.itemTitles != pairTitles{pairs.removeAllItems();pairs.addItems(withTitles:pairTitles)}
         pairs.selectItem(at:max(0,state.pair));pairs.isEnabled=state.pairs.count>1
         speed.doubleValue=state.speed
