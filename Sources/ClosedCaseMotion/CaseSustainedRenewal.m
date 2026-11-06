@@ -193,6 +193,23 @@ static NSArray *wireFields(NSData *data) {
     }return fields;
 }
 static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<8 | (uint32_t)b[2]<<16 | (uint32_t)b[3]<<24;}
+// AirPods 4 diagnostics. Field numbers and small integer values only; byte strings show their length.
+static NSString *describeFields(NSData *data,int depth) {
+    NSMutableArray *parts=NSMutableArray.array;
+    for(NSDictionary *field in wireFields(data)) {
+        if(field[@"value"]) {[parts addObject:[NSString stringWithFormat:@"%@=%@",field[@"number"],field[@"value"]]];continue;}
+        NSData *bytes=field[@"bytes"];NSArray *inner=depth<3?wireFields(bytes):@[];
+        if(inner.count) [parts addObject:[NSString stringWithFormat:@"%@{%@}",field[@"number"],describeFields(bytes,depth+1)]];
+        else [parts addObject:[NSString stringWithFormat:@"%@:bytes[%lu]",field[@"number"],(unsigned long)bytes.length]];
+    }
+    return [parts componentsJoinedByString:@" "];
+}
+// Motion readings only (never UARP or identity traffic), capped at 128 bytes.
+static NSString *hexString(NSData *data) {
+    NSMutableString *text=NSMutableString.string;const uint8_t *p=data.bytes;
+    for(NSUInteger i=0;i<data.length && i<128;i++) [text appendFormat:@"%02x",p[i]];
+    return text;
+}
 @interface ConsoleReader : NSObject <NSStreamDelegate>
 @property(nonatomic,assign) FILE *motionStream;
 @property BOOL motionStreamFailed;
@@ -204,6 +221,7 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
 @property NSMutableDictionary *lastSamples;
 @property NSUInteger accelReports,gyroReports,accelFresh,gyroFresh;
 @property NSMutableSet *seenShapes;
+@property NSUInteger repliesLogged,otherReportsLogged;
 @end
 @implementation ConsoleReader
 - (instancetype)init { if ((self = [super init])) { self.buffer = NSMutableData.data; self.uarpMessages = NSMutableArray.array;self.earbudStateEvents=NSMutableArray.array;self.lastSamples=NSMutableDictionary.dictionary;self.phase=@"open_baseline";self.seenShapes=NSMutableSet.set; } return self; }
@@ -279,7 +297,7 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
                 if (i + 12 + size > count) break;
                 if(descriptor!=0x100000) [self noteShape:[NSString stringWithFormat:@"opcode=0x17 descriptor=0x%x size=%lu",descriptor,(unsigned long)size]];
                 if(descriptor==0x100000) {
-                    NSData *payload=[NSData dataWithBytes:b+i+12 length:size];
+                    NSData *payload=[NSData dataWithBytes:b+i+12 length:size];BOOL rawMotion=NO;
                     for(NSDictionary *outer in wireFields(payload)) if([outer[@"number"] unsignedIntValue]!=7 || !outer[@"bytes"]) [self noteShape:[NSString stringWithFormat:@"opcode=0x17 outer_field=%u",[outer[@"number"] unsignedIntValue]]];
                     for(NSDictionary *outer in wireFields(payload)) if([outer[@"number"] unsignedIntValue]==7 && outer[@"bytes"]) {
                         NSNumber *service=nil;NSData *report=nil;
@@ -288,6 +306,8 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
                             if([field[@"number"] unsignedIntValue]==3) report=field[@"bytes"];
                         }
                         [self noteShape:[NSString stringWithFormat:@"opcode=0x17 service=%@ report_length=%lu first_byte=%u",service?service.stringValue:@"none",(unsigned long)report.length,(unsigned)(report.length?((const uint8_t *)report.bytes)[0]:0)]];
+                        if([service unsignedIntValue]==11 || [service unsignedIntValue]==12) rawMotion=YES;
+                        else if(report && self.otherReportsLogged<8) {self.otherReportsLogged++;printf("MOTION REPORT uptime=%.6f service=%s length=%lu hex=%s\n",NSProcessInfo.processInfo.systemUptime,service?service.stringValue.UTF8String:"none",(unsigned long)report.length,hexString(report).UTF8String);}
                         if(([service unsignedIntValue]==11 || [service unsignedIntValue]==12) && report.length==28) {
                             const uint8_t *r=report.bytes;uint64_t stamp=le32(r+20) | (uint64_t)le32(r+24)<<32;
                             if(r[0]==1 && stamp>0) {
@@ -303,6 +323,7 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
                             }
                         }
                     }
+                    if(!rawMotion && self.repliesLogged<12) {self.repliesLogged++;printf("MOTION REPLY uptime=%.6f size=%lu fields: %s\n",NSProcessInfo.processInfo.systemUptime,(unsigned long)size,describeFields(payload,0).UTF8String);}
                 }
                 self.controls++; self.scanned += 12 + size;
             } else {
@@ -802,7 +823,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     if(setup) setup=sendPacket(output,packet(notifications,sizeof(notifications)),"known notifications");
     if(setup) receiveUntilAnswered(reader,input,.5,7,2);
     step("session setup answered");
-    BOOL sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
+    BOOL headAttempted=NO,sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
     CaseSnapshot *transfer=CaseSnapshot.new;transfer.output=output;transfer.targetBound=YES;double nextQuery=0,lastRootQueryAt=0;
     int exitCode=HelperExitOK;NSString *reason=@"deadline";
     NSURL *leaseURL=[directory.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"app-lease.txt"];
@@ -890,6 +911,10 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
             printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu gyro=%lu arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,(unsigned long)reader.gyroReports,latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
         }
         if(input.streamStatus==NSStreamStatusError || input.streamStatus==NSStreamStatusAtEnd) {reason=@"input ended";exitCode=HelperExitInputEnded;break;}
+        if(!headAttempted && now-began>4 && reader.accelReports==0 && reader.gyroReports==0) {
+            headAttempted=YES;
+            if(!sendPacket(output,sensorSetting(14,40000),"AirPods 4 probe: head tracking (service 14)")) printf("AirPods 4 probe: head tracking start write failed\n");
+        }
         if(now-began>15 && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
         if(now-began>160 && !baselineVerified) {[transfer fail:HelperExitIdentityUnavailable reason:@"motion arrived but diagnostic identity remained unavailable"];reason=transfer.error;break;}
     }
@@ -906,6 +931,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     // 1. Sensor STOP, then (2) the scoped Abandon of this exact live offered
     // asset. Abandon can consume the case's staged analytics; see beginCleanup.
     BOOL accelStopped=NO,gyroStopped=NO;
+    if(headAttempted && !sendPacket(output,sensorSetting(14,0),"AirPods 4 probe: head tracking STOP")) printf("AirPods 4 probe: head tracking STOP write failed\n");
     stopSensorsThenRelease(output,transfer,accelAttempted,gyroAttempted,&accelStopped,&gyroStopped);
     // On a channel the link already ended a STOP cannot be delivered; the
     // dropped link stays the reported cause (the log line below still shows it).
