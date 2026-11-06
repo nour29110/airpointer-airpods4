@@ -203,9 +203,17 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
 @property NSString *phase;
 @property NSMutableDictionary *lastSamples;
 @property NSUInteger accelReports,gyroReports,accelFresh,gyroFresh;
+@property NSMutableSet *seenShapes;
 @end
 @implementation ConsoleReader
-- (instancetype)init { if ((self = [super init])) { self.buffer = NSMutableData.data; self.uarpMessages = NSMutableArray.array;self.earbudStateEvents=NSMutableArray.array;self.lastSamples=NSMutableDictionary.dictionary;self.phase=@"open_baseline"; } return self; }
+- (instancetype)init { if ((self = [super init])) { self.buffer = NSMutableData.data; self.uarpMessages = NSMutableArray.array;self.earbudStateEvents=NSMutableArray.array;self.lastSamples=NSMutableDictionary.dictionary;self.phase=@"open_baseline";self.seenShapes=NSMutableSet.set; } return self; }
+// AirPods 4 diagnostics: logs the shape of each new kind of message once (opcode, descriptor,
+// sensor service number, report length). Numbers only; payload bytes are never printed.
+- (void)noteShape:(NSString *)shape {
+    if(self.seenShapes.count>=64 || [self.seenShapes containsObject:shape]) return;
+    [self.seenShapes addObject:shape];
+    printf("MOTION SHAPE uptime=%.6f %s\n",NSProcessInfo.processInfo.systemUptime,shape.UTF8String);
+}
 - (void)stream:(NSStream *)stream handleEvent:(NSStreamEvent)event {
     if (event == NSStreamEventErrorOccurred) {
         printf("Input stream error code=%ld\n", (long)stream.streamError.code); return;
@@ -269,14 +277,17 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
                 uint32_t descriptor = b[i+6] | b[i+7]<<8 | b[i+8]<<16 | (uint32_t)b[i+9]<<24;
                 NSUInteger size = b[i+10] | b[i+11]<<8;
                 if (i + 12 + size > count) break;
+                if(descriptor!=0x100000) [self noteShape:[NSString stringWithFormat:@"opcode=0x17 descriptor=0x%x size=%lu",descriptor,(unsigned long)size]];
                 if(descriptor==0x100000) {
                     NSData *payload=[NSData dataWithBytes:b+i+12 length:size];
+                    for(NSDictionary *outer in wireFields(payload)) if([outer[@"number"] unsignedIntValue]!=7 || !outer[@"bytes"]) [self noteShape:[NSString stringWithFormat:@"opcode=0x17 outer_field=%u",[outer[@"number"] unsignedIntValue]]];
                     for(NSDictionary *outer in wireFields(payload)) if([outer[@"number"] unsignedIntValue]==7 && outer[@"bytes"]) {
                         NSNumber *service=nil;NSData *report=nil;
                         for(NSDictionary *field in wireFields(outer[@"bytes"])) {
                             if([field[@"number"] unsignedIntValue]==1) service=field[@"value"];
                             if([field[@"number"] unsignedIntValue]==3) report=field[@"bytes"];
                         }
+                        [self noteShape:[NSString stringWithFormat:@"opcode=0x17 service=%@ report_length=%lu first_byte=%u",service?service.stringValue:@"none",(unsigned long)report.length,(unsigned)(report.length?((const uint8_t *)report.bytes)[0]:0)]];
                         if(([service unsignedIntValue]==11 || [service unsignedIntValue]==12) && report.length==28) {
                             const uint8_t *r=report.bytes;uint64_t stamp=le32(r+20) | (uint64_t)le32(r+24)<<32;
                             if(r[0]==1 && stamp>0) {
@@ -295,6 +306,7 @@ static uint32_t le32(const uint8_t *b) {return (uint32_t)b[0] | (uint32_t)b[1]<<
                 }
                 self.controls++; self.scanned += 12 + size;
             } else {
+                [self noteShape:[NSString stringWithFormat:@"opcode=0x%x",(unsigned)opcode]];
                 if (opcode==2 || opcode==4 || opcode==6 || opcode==8 || opcode==12 || opcode==14 || opcode==43 || opcode==46 || opcode==79) self.controls++;
                 self.scanned += 6;
             }
@@ -875,7 +887,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
                 @"sensors":sensors,@"earbud_state_events":[reader.earbudStateEvents copy],@"case_snapshot":[transfer status]};
             if(![[NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[directory URLByAppendingPathComponent:@"status.json"] atomically:YES]) {[transfer fail:HelperExitCaptureWrite reason:@"status write failed"];reason=transfer.error;break;}
             NSDictionary *latest=reader.lastSamples[@"11"];
-            printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
+            printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu gyro=%lu arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,(unsigned long)reader.gyroReports,latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
         }
         if(input.streamStatus==NSStreamStatusError || input.streamStatus==NSStreamStatusAtEnd) {reason=@"input ended";exitCode=HelperExitInputEnded;break;}
         if(now-began>15 && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
