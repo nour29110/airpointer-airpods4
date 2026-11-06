@@ -1,49 +1,40 @@
-# AirPods 4 support (experimental)
+# AirPods 4 support
 
-This branch lets AirPointer try an AirPods 4 case. Nothing about how it talks to the AirPods changed; it only stops refusing them. See `git diff main` for every line that changed.
+This branch lets AirPointer turn an **AirPods 4** case into a pointer, the same way it does with AirPods Pro. You don't need to change any AirPods settings. See `git diff main` for every line that changed.
 
-## What changed
+## How it works
 
-1. **The app offers AirPods 4.** Their Bluetooth product IDs were added next to the AirPods Pro ones: `0x201B` (AirPods 4 with ANC) and `0x2019` (believed to be AirPods 4 without ANC).
-2. **The helper accepts AirPods 4 earbuds.** It used to require the earbud firmware to call itself "AirPods Pro". It now also accepts "AirPods 4" or plain "AirPods". AirPods Max and anything naming a case are still refused.
-3. **The helper accepts an AirPods 4 case.** It used to require "Charging Case" in the case's firmware name; now "Case" is enough.
-4. **Refusals say what the AirPods answered.** If a model check still fails, the session log's `EXIT` line now includes the exact name the earbud or case reported.
+AirPointer points by reading the motion sensors of the earbuds sitting in the case. AirPods Pro stream raw accelerometer and gyroscope data (sensor services 11 and 12) at 200 Hz. AirPods 4 acknowledge those requests but never send any data.
 
-## Check your product ID first
+AirPods 4 do stream **head tracking** (sensor service 16). Each 58-byte report carries:
 
-```
-system_profiler SPBluetoothDataType | grep -i -A10 airpods | grep -i "product id"
-```
-
-If it shows something other than `0x2019` or `0x201B`, add it to `models` in `Sources/AirPointer/Session/ClosedCaseAirPods.swift` (lowercase, like `"0x201b"`).
-
-## Build and test
-
-```
-zsh ./build.sh
-open AirPointer.app
-```
-
-Then follow the normal setup in the README. If a connection fails, the app shows a message, and the newest folder in `~/Library/Application Support/AirPointer/PointerSessions/` has a `native.log`. Its `STEP` lines and final `EXIT` line show exactly how far it got.
-
-## What to expect
-
-AirPointer works by keeping the earbuds' motion sensors streaming while they sit in the closed case. That relies on how the case firmware behaves, which was worked out on AirPods Pro 3. An AirPods 4 case runs different firmware, so this may stop at one of these points:
-
-| Exit code | Meaning on AirPods 4 |
+| Bytes | Contents |
 | --- | --- |
-| 27 or 28 | The AirPods 4 don't open the motion channel the same way. |
-| 30 or 43 | The channel opened, but no motion came, or it stopped. |
-| 32 or 34 | A model name we didn't expect; the log line shows the name. |
-| 36 | The case refused the request that keeps it awake. |
+| 0 | `01` |
+| 1–8 | Time, nanoseconds (64-bit, little-endian) |
+| 20–25 | The earbud's fused orientation: a quaternion's vector part in Q15. w is implied and kept ≥ 0, so all three values flip sign together when w would go negative. |
+| 44–49 | The accelerometer, in the same body frame, 1024 per g |
 
-The original README's warnings still apply: each session uses up the case's stored diagnostic records, some AirPods connection settings stay as the session set them, and the Bluetooth link drops for a moment when connecting. The helper's own notes say it sends no firmware, configuration or security writes to the AirPods.
+For AirPods 4, the helper asks for service 16 and **translates each report into the raw rows AirPointer already uses**:
 
-## Findings so far (tested on AirPods 4, product ID 0x2019, firmware 9A348)
+- The accelerometer becomes an accelerometer row (service 11, g × 10⁵).
+- The change in orientation since the previous report, divided by the time between them, becomes a gyroscope row (service 12, degrees per second × 10⁵, in the body frame).
 
-- The connection, setup and UARP check-ins all work.
-- AirPods 4 acknowledge requests for sensor services 11 and 12 (raw accelerometer and gyroscope, which AirPods Pro stream) and 14 (LibrePods' original head tracking), but never send a reading. Two other projects document the same behavior.
-- AirPods 4 stream head tracking on service **16** (LibrePods' "alternate" start). Each report is 58 bytes, starts with `01`, and holds the earbud's fused orientation as a Q15 quaternion vector at bytes 20–25 (w is implied).
-- AirPods only stream while they consider themselves in use. Kinapod streams from a bare AirPod off-ear with Automatic Ear Detection off and the microphone fixed to one bud. Whether that also works with the buds docked in the case is the open question this build tests.
+AirPointer's own fusion integrates those rows back into the earbud's orientation, so everything else (setup, the closed-lid check, calibration, pointing and tap clicks) runs unchanged. AirPods Pro never take this path: the app passes `--head-tracking` to the helper only for AirPods 4 (product IDs `0x2019` and `0x201B`).
 
-Sources: LibrePods (`AACPManager.kt`, docs), pods-head-tracker (`opentrack_bridge.py`), airpods-head-track (`aacp.rs`, `head_tracking.rs`), kinapod.com/technology.
+AirPods 4 ignore a start they can't act on, so until reports arrive the helper asks again: first for 100 readings a second, then 50, then 25, then every 4 seconds.
+
+## Clicking
+
+Tap the front of the case, as with AirPods Pro. AirPods 4 send 25 to 100 readings a second rather than 200, so a short tap can fall between readings. **The right ⌥ key also clicks** wherever the case points, while pointing is on. It types nothing, so it can't land in a game or a text field.
+
+## Checks
+
+- `build.sh` runs the helper's offline self-test, which decodes two real AirPods 4 packets: 1 g at rest, almost no turning, correct timestamps, and no translation for AirPods Pro.
+- A simulation fed an AirPods 4 stream through this translation into AirPointer's own `Orientation.js` and `Grip`. Over 20 seconds of turning, including four sign flips, it tracked the true orientation within 0.5° at 25, 50 and 100 Hz, and the pointer landed within 0.02% of the screen of the true position.
+
+## Notes
+
+- Tested on AirPods 4 with product ID `0x2019` and firmware 9A348 up to the motion request. The service 16 format comes from the airpods-head-track and pods-head-tracker projects, which recorded it on AirPods 4, and from LibrePods.
+- The original README's warnings still apply: each session uses up the case's stored diagnostic records, some connection settings stay as the session set them, and the Bluetooth link drops for a moment when connecting.
+- `HOLD` lines in a session's `native.log` show `ht=`, the number of head-tracking reports received.

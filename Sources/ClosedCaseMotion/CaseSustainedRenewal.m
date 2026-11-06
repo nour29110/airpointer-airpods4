@@ -227,6 +227,10 @@ static NSString *hexString(NSData *data) {
 // vector (x, y, z) at bytes 20-25; the scalar part is implied, w = sqrt(1 - |v|^2).
 @property NSUInteger headReports;
 @property NSData *lastHead;
+// Set in head-tracking mode (AirPods 4): service 16 reports become accelerometer and gyroscope samples.
+@property BOOL adaptHead,hasHead;
+@property double headW,headX,headY,headZ;
+@property uint64_t headStamp;
 @end
 @implementation ConsoleReader
 - (instancetype)init { if ((self = [super init])) { self.buffer = NSMutableData.data; self.uarpMessages = NSMutableArray.array;self.earbudStateEvents=NSMutableArray.array;self.lastSamples=NSMutableDictionary.dictionary;self.phase=@"open_baseline";self.seenShapes=NSMutableSet.set; } return self; }
@@ -236,6 +240,50 @@ static NSString *hexString(NSData *data) {
     if(self.seenShapes.count>=64 || [self.seenShapes containsObject:shape]) return;
     [self.seenShapes addObject:shape];
     printf("MOTION SHAPE uptime=%.6f %s\n",NSProcessInfo.processInfo.systemUptime,shape.UTF8String);
+}
+// One accelerometer (11) or gyroscope (12) sample, recorded and written to the app exactly as a raw report is.
+- (void)recordService:(unsigned)service stamp:(uint64_t)stamp x:(int32_t)x y:(int32_t)y z:(int32_t)z {
+    NSString *key=service==11?@"11":@"12";
+    NSDictionary *previous=self.lastSamples[key];
+    BOOL fresh=!previous || stamp>[previous[@"sensor_us"] unsignedLongLongValue];
+    double received=NSProcessInfo.processInfo.systemUptime;
+    if(fresh) self.lastSamples[key]=@{@"sensor_us":@(stamp),@"received_uptime":@(received),@"x":@(x),@"y":@(y),@"z":@(z)};
+    if(service==11){self.accelReports++;if(fresh)self.accelFresh++;}
+    else{self.gyroReports++;if(fresh)self.gyroFresh++;}
+    NSUInteger sequence=self.accelReports+self.gyroReports;
+    if(fresh && self.motionStream && fprintf(self.motionStream,"%lu,%u,%llu,%.9f,%d,%d,%d\n",(unsigned long)sequence,service,(unsigned long long)stamp,received,x,y,z)<0) self.motionStreamFailed=YES;
+}
+// AirPods 4 head tracking (service 16) as the raw rows the app already reads, so its setup, pointing and taps work
+// unchanged. The 58-byte report holds a 64-bit nanosecond time at byte 1; the earbud's fused orientation at 20, as a
+// Q15 quaternion vector (w is implied and kept >= 0, so all three flip sign together when it would turn negative); and
+// its accelerometer at 44, in the same body frame, 1024 per g. The accelerometer becomes service 11 (g, times 1e5).
+// The gyroscope becomes service 12 (degrees per second, times 1e5): the turn from the previous orientation, in the body
+// frame, over the time between them, which the app's integration turns back into the earbud's own orientation.
+- (void)adaptHeadReport:(NSData *)report {
+    const uint8_t *r=report.bytes;
+    uint64_t nanoseconds=le32(r+1) | (uint64_t)le32(r+5)<<32,stamp=nanoseconds/1000;
+    if(!stamp) return;
+    double v[3],n=0;
+    for(int i=0;i<3;i++) {v[i]=(int16_t)(r[20+2*i] | r[21+2*i]<<8)/32767.0;n+=v[i]*v[i];}
+    double q[4]={sqrt(n<1?1-n:0),v[0],v[1],v[2]},length=sqrt(q[0]*q[0]+n);
+    for(int i=0;i<4;i++) q[i]/=length;
+    double rate[3]={0,0,0};
+    if(self.hasHead && stamp>self.headStamp && stamp-self.headStamp>=2000 && stamp-self.headStamp<=200000) {
+        // d = previous^-1 * q: the turn since the previous report, in the body frame.
+        double p[4]={self.headW,-self.headX,-self.headY,-self.headZ};
+        double d[4]={p[0]*q[0]-p[1]*q[1]-p[2]*q[2]-p[3]*q[3],
+                     p[0]*q[1]+p[1]*q[0]+p[2]*q[3]-p[3]*q[2],
+                     p[0]*q[2]-p[1]*q[3]+p[2]*q[0]+p[3]*q[1],
+                     p[0]*q[3]+p[1]*q[2]-p[2]*q[1]+p[3]*q[0]};
+        if(d[0]<0) for(int i=0;i<4;i++) d[i]=-d[i];
+        double s=sqrt(d[1]*d[1]+d[2]*d[2]+d[3]*d[3]),seconds=(stamp-self.headStamp)*1e-6;
+        if(s>1e-12) for(int i=0;i<3;i++) rate[i]=d[i+1]/s*2*atan2(s,d[0])/seconds*180/M_PI;
+    }
+    self.hasHead=YES;self.headStamp=stamp;self.headW=q[0];self.headX=q[1];self.headY=q[2];self.headZ=q[3];
+    int32_t a[3];
+    for(int i=0;i<3;i++) a[i]=(int32_t)lround((int16_t)(r[44+2*i] | r[45+2*i]<<8)*100000.0/1024);
+    [self recordService:11 stamp:stamp x:a[0] y:a[1] z:a[2]];
+    [self recordService:12 stamp:stamp+1 x:(int32_t)lround(rate[0]*1e5) y:(int32_t)lround(rate[1]*1e5) z:(int32_t)lround(rate[2]*1e5)];
 }
 - (void)stream:(NSStream *)stream handleEvent:(NSStreamEvent)event {
     if (event == NSStreamEventErrorOccurred) {
@@ -312,7 +360,7 @@ static NSString *hexString(NSData *data) {
                         }
                         [self noteShape:[NSString stringWithFormat:@"opcode=0x17 service=%@ report_length=%lu first_byte=%u",service?service.stringValue:@"none",(unsigned long)report.length,(unsigned)(report.length?((const uint8_t *)report.bytes)[0]:0)]];
                         if([service unsignedIntValue]==11 || [service unsignedIntValue]==12) rawMotion=YES;
-                        if([service unsignedIntValue]==16 && report.length>=26 && ((const uint8_t *)report.bytes)[0]==1) {self.headReports++;self.lastHead=report;}
+                        if([service unsignedIntValue]==16 && report.length>=50 && ((const uint8_t *)report.bytes)[0]==1) {rawMotion=YES;self.headReports++;self.lastHead=report;if(self.adaptHead) [self adaptHeadReport:report];}
                         else if(report && self.otherReportsLogged<8) {self.otherReportsLogged++;printf("MOTION REPORT uptime=%.6f service=%s length=%lu hex=%s\n",NSProcessInfo.processInfo.systemUptime,service?service.stringValue.UTF8String:"none",(unsigned long)report.length,hexString(report).UTF8String);}
                         if(([service unsignedIntValue]==11 || [service unsignedIntValue]==12) && report.length==28) {
                             const uint8_t *r=report.bytes;uint64_t stamp=le32(r+20) | (uint64_t)le32(r+24)<<32;
@@ -746,6 +794,11 @@ static NSData *varintData(uint32_t value) {
 // The sequence carries on across sessions, so it lives in the app's data folder,
 // beside the target file rather than wherever the helper happened to be started.
 static NSString *sensorSequencePath=nil;
+// --head-tracking (the app passes it for AirPods 4): stream service 16 instead of the raw sensors.
+static BOOL headTrackingMode=NO;
+// Fastest first, ending at the 25 Hz that every head-tracking client uses.
+static const uint32_t headIntervals[]={10000,20000,40000};
+static const NSUInteger headIntervalCount=3;
 // Set only when the file couldn't be written, so one session never repeats a number.
 static unsigned unsavedSensorSequence=0;
 static NSData *sensorSetting(uint8_t service,uint32_t interval) {
@@ -835,7 +888,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     if(setup) setup=sendPacket(output,packet(notifications,sizeof(notifications)),"known notifications");
     if(setup) receiveUntilAnswered(reader,input,.5,7,2);
     step("session setup answered");
-    double lastStartAt=0;NSUInteger restarts=0;BOOL headAttempted=NO,sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
+    double lastStartAt=0;NSUInteger headStep=0;BOOL headAttempted=NO,sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
     CaseSnapshot *transfer=CaseSnapshot.new;transfer.output=output;transfer.targetBound=YES;double nextQuery=0,lastRootQueryAt=0;
     int exitCode=HelperExitOK;NSString *reason=@"deadline";
     NSURL *leaseURL=[directory.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"app-lease.txt"];
@@ -843,10 +896,14 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     else if(!setup) {exitCode=HelperExitWriteFailed;reason=@"AACP session setup write failed";}
     else if(!reader.controls) {exitCode=HelperExitNoSessionReply;reason=@"AACP channel opened but nothing answered the session setup";}
     else if(!sessionLeaseFresh(leaseURL,NSProcessInfo.processInfo.systemUptime)) {stopped=YES;exitCode=HelperExitLeaseExpired;reason=@"app session lease expired before sensors started";}
+    else if(headTrackingMode) {
+        // AirPods 4 acknowledge the raw sensor services (11, 12) but never stream them. They stream head
+        // tracking, service 16, which the reader turns into the same accelerometer and gyroscope rows.
+        reader.adaptHead=YES;headAttempted=YES;lastStartAt=NSProcessInfo.processInfo.systemUptime;
+        sensorsStarted=sendPacket(output,sensorSetting(16,headIntervals[0]),"AirPods 4 head tracking");
+        if(!sensorsStarted) {exitCode=HelperExitWriteFailed;reason=@"head tracking start write failed";}
+    }
     else {
-        headAttempted=YES;lastStartAt=NSProcessInfo.processInfo.systemUptime;
-        if(!sendPacket(output,sensorSetting(16,40000),"AirPods 4: head tracking start (service 16)")) printf("AirPods 4: head tracking start write failed\n");
-        pump(.2);
         accelAttempted=YES;accelStarted=sendPacket(output,sensorSetting(11,5000),"known accel");pump(.2);
         gyroAttempted=YES;gyroStarted=sendPacket(output,sensorSetting(12,5000),"known gyro");
         sensorsStarted=accelStarted && gyroStarted;
@@ -926,13 +983,13 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
             printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu gyro=%lu ht=%lu q=%d,%d,%d arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,(unsigned long)reader.gyroReports,(unsigned long)reader.headReports,headQ(reader.lastHead,0),headQ(reader.lastHead,1),headQ(reader.lastHead,2),latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
         }
         if(input.streamStatus==NSStreamStatusError || input.streamStatus==NSStreamStatusAtEnd) {reason=@"input ended";exitCode=HelperExitInputEnded;break;}
-        if(headAttempted && now-lastStartAt>=4 && restarts<24) {
-            lastStartAt=now;
-            if(reader.headReports==0) {restarts++;if(!sendPacket(output,sensorSetting(16,40000),"AirPods 4: head tracking start again (service 16)")) printf("AirPods 4: head tracking restart write failed\n");}
-            if(reader.accelReports==0 && reader.gyroReports==0) {restarts++;sendPacket(output,sensorSetting(11,5000),"known accel again");sendPacket(output,sensorSetting(12,5000),"known gyro again");}
+        // AirPods 4 drop a start they can't act on (an interval they don't offer, or one sent before they're ready),
+        // so until reports arrive: step from the fastest interval to 25 Hz, then keep asking every 4 s.
+        if(headAttempted && reader.headReports==0 && now-lastStartAt>=(headStep+1<headIntervalCount?1.5:4)) {
+            lastStartAt=now;if(headStep+1<headIntervalCount) headStep++;
+            if(!sendPacket(output,sensorSetting(16,headIntervals[headStep]),"AirPods 4 head tracking again")) {[transfer fail:HelperExitWriteFailed reason:@"head tracking start write failed"];reason=transfer.error;break;}
         }
-        // AirPods 4 diagnosis: a longer window, so one run can try the earbuds in the case, in a hand and back.
-        if(now-began>45 && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
+        if(now-began>(headTrackingMode?30:15) && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
         if(now-began>160 && !baselineVerified) {[transfer fail:HelperExitIdentityUnavailable reason:@"motion arrived but diagnostic identity remained unavailable"];reason=transfer.error;break;}
     }
     } // Drain temporary objects on each live receive cycle.
@@ -948,7 +1005,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     // 1. Sensor STOP, then (2) the scoped Abandon of this exact live offered
     // asset. Abandon can consume the case's staged analytics; see beginCleanup.
     BOOL accelStopped=NO,gyroStopped=NO;
-    if(headAttempted && !sendPacket(output,sensorSetting(16,0),"AirPods 4: head tracking STOP (service 16)")) printf("AirPods 4: head tracking STOP write failed\n");
+    if(headAttempted && !sendPacket(output,sensorSetting(16,0),"AirPods 4 head tracking STOP")) printf("AirPods 4 head tracking STOP write failed\n");
     stopSensorsThenRelease(output,transfer,accelAttempted,gyroAttempted,&accelStopped,&gyroStopped);
     // On a channel the link already ended a STOP cannot be delivered; the
     // dropped link stays the reported cause (the log line below still shows it).
@@ -1265,8 +1322,33 @@ static void hardeningChecks(void) {
     check(writeFailureMeansLinkEnded(HelperExitWriteFailed,0,YES) && writeFailureMeansLinkEnded(0,HelperExitWriteFailed,YES),@"a write failure on an ended channel reports INPUT_ENDED");
     check(!writeFailureMeansLinkEnded(0,HelperExitWriteFailed,NO) && !writeFailureMeansLinkEnded(HelperExitLeaseExpired,HelperExitWriteFailed,YES) && !writeFailureMeansLinkEnded(0,HelperExitReplyTimeout,YES),@"other failures and write failures on a live channel keep their codes");
 }
+static NSData *hexData(const char *hex) {
+    NSMutableData *data=NSMutableData.data;
+    for(size_t i=0;hex[i] && hex[i+1];i+=2) {char pair[3]={hex[i],hex[i+1],0};uint8_t byte=(uint8_t)strtoul(pair,NULL,16);[data appendBytes:&byte length:1];}
+    return data;
+}
+static void feedReader(ConsoleReader *reader,NSData *data) {
+    NSInputStream *input=[NSInputStream inputStreamWithData:data];[input open];
+    [reader stream:input handleEvent:NSStreamEventHasBytesAvailable];[input close];
+}
+static void headAdapterChecks(void) {
+    // Two real AirPods 4 head-tracking packets from a resting earbud, 80 ms apart (airpods-head-track's captures).
+    NSData *first=hexData("04000400170000001000450008ff7f10013a3e08101a3a015021d8c7130d0000030043998d62bb000000006cb9a83eb5fc0300020001005e1003d37706fdff000001008d020d035c0034aac63786ff0000");
+    NSData *second=hexData("040004001700000010004400080110013a3e08101a3a01088297cc130d0000030043cbc463bb0000000078b9ba3ebbfcffff00000e005f1003d37706030000000b008c020e035d00c29c973796ff0000");
+    ConsoleReader *pro=ConsoleReader.new;feedReader(pro,first);
+    check(pro.headReports==1 && pro.accelReports==0 && pro.gyroReports==0,@"head tracking is adapted only in head-tracking mode, so AirPods Pro keep their raw stream");
+    ConsoleReader *reader=ConsoleReader.new;reader.adaptHead=YES;feedReader(reader,first);feedReader(reader,second);
+    NSDictionary *accel=reader.lastSamples[@"11"],*gyro=reader.lastSamples[@"12"];
+    double ax=[accel[@"x"] doubleValue],ay=[accel[@"y"] doubleValue],az=[accel[@"z"] doubleValue];
+    double gx=[gyro[@"x"] doubleValue],gy=[gyro[@"y"] doubleValue],gz=[gyro[@"z"] doubleValue];
+    check(reader.accelReports==2 && reader.gyroReports==2 && reader.accelFresh==2 && reader.gyroFresh==2,@"each AirPods 4 report becomes one accelerometer and one gyroscope sample");
+    check(fabs(sqrt(ax*ax+ay*ay+az*az)*1e-5-1)<0.02,@"the AirPods 4 accelerometer reads 1 g at rest");
+    check(sqrt(gx*gx+gy*gy+gz*gz)*1e-5<3,@"a resting AirPods 4 earbud reads almost no turning");
+    check([accel[@"sensor_us"] unsignedLongLongValue]==14378688021ULL && [gyro[@"sensor_us"] unsignedLongLongValue]==14378688022ULL,@"AirPods 4 nanoseconds become the raw stream's microseconds");
+}
 static int offlineSelfTest(void) {
     sessionChecks();
+    headAdapterChecks();
     hardeningChecks();
     ConsoleReader *sensorReader=ConsoleReader.new;sensorReader.motionStream=tmpfile();check(sensorReader.motionStream!=NULL,@"offline sensor stream opened");testSensorWire(sensorReader,100);
     NSDictionary *firstSensor=sensorReader.lastSamples[@"11"];
@@ -1435,7 +1517,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     setbuf(stdout, NULL);
     if(argc==2 && !strcmp(argv[1],"--self-test")) return offlineSelfTest();
     if(argc==3 && !strcmp(argv[1],"--self-test-watchdog-child")) return watchdogChild(argv[2]);
-    if(argc!=4 || strcmp(argv[2],"--pointer-session")) {puts("Usage: ClosedCaseMotion TARGET_ADDRESS_FILE --pointer-session NEW_CAPTURE_DIRECTORY");return HelperExitUsage;}
+    BOOL headArgument=argc==5 && !strcmp(argv[4],"--head-tracking");
+    if((argc!=4 && !headArgument) || strcmp(argv[2],"--pointer-session")) {puts("Usage: ClosedCaseMotion TARGET_ADDRESS_FILE --pointer-session NEW_CAPTURE_DIRECTORY [--head-tracking]");return HelperExitUsage;}
+    headTrackingMode=headArgument;
     motionOnStdout=YES;
     sensorSequencePath=[@(argv[1]).stringByDeletingLastPathComponent stringByAppendingPathComponent:@"closed-case-sensor-sequence.txt"];
     // A closed parent pipe must never kill the helper mid-reconnect, and a

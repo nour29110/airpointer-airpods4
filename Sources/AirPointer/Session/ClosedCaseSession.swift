@@ -518,6 +518,8 @@ final class ClosedCaseSession: NSObject {
     private var generation=0, lastStatus=0.0, lastHost=0.0, pressedAt=0.0, loggedReady=false
     private var smooth=CGPoint(x:0.5,y:0.5), feedError:String?
     private var pointerFilter=ClosedCasePointerFilter()
+    // AirPods 4: the helper streams head tracking as raw motion (--head-tracking). The right ⌥ key also clicks.
+    private var headTracking=false,clickKeyMonitor:Any?
     private var readStats=(count:0,total:0.0,longest:0.0,since:0.0)
     private var tapDetector=ClosedCaseTapDetector(),recentPoints:[(t:Double,point:CGPoint)]=[],tapHold:CGPoint?
     private var lastClick:(uptime:Double,position:CGPoint,count:Int64)?
@@ -653,6 +655,7 @@ final class ClosedCaseSession: NSObject {
                 guard let self,self.preparing,self.preparation==token else{return}
                 let choice=ClosedCaseAirPods.choose(survey,saved:ClosedCaseAirPods.saved)
                 guard case .chosen(let pair)=choice else{self.finished(choice.failure ?? "");return}
+                self.headTracking=ClosedCaseAirPods.headTrackingModels.contains(pair.productID)
                 do{try ClosedCaseAirPods.save(pair)}catch{self.finished("AirPointer couldn’t save which AirPods to use. Connect again.");return}
                 AudioOutputGuard.shared.sessionStarted(target:pair.address)
                 loadClosedCaseCalibration(from:self.calibrationURL,grip:self.gripURL,target:self.target){[weak self] hash,saved,grip in
@@ -681,6 +684,7 @@ final class ClosedCaseSession: NSObject {
             finished("AirPods connection setup is missing from this build.");return
         }
         do{
+            watchClickKey()
             try resetFusion();confirmed=false;connected=false;ready=false;stopping=false;closedAt=0;stoppedAt=0;userEnded=false;hasPointed=false;pause()
             startedAt=ProcessInfo.processInfo.systemUptime
             if let activity{ProcessInfo.processInfo.endActivity(activity)}
@@ -714,7 +718,7 @@ final class ClosedCaseSession: NSObject {
             finished("The closed-case motion component is missing.");return
         }
         let process=Process();helper=process;process.executableURL=executable
-        process.arguments=[target.path,"--pointer-session",capture.path]
+        process.arguments=[target.path,"--pointer-session",capture.path]+(headTracking ? ["--head-tracking"]:[])
         var errorPipe:Pipe?
         let motionPipe=Pipe();stream=motionPipe.fileHandleForReading
         let flags=fcntl(motionPipe.fileHandleForReading.fileDescriptor,F_GETFL)
@@ -754,7 +758,7 @@ final class ClosedCaseSession: NSObject {
         let now=ProcessInfo.processInfo.systemUptime
         if isActive && !stopping{do{try renewSessionLease()}catch{fail("Couldn’t keep the pointer connection active.");return}}
         if bootstrap?.isRunning == true && now-startedAt>30{feedError="AirPods did not connect. Open the lid, wake one earbud, then reconnect.";stop();return}
-        if !stopping && helper?.isRunning == true && !confirmed && lastHost==0 && now-helperStartedAt>50{
+        if !stopping && helper?.isRunning == true && !confirmed && lastHost==0 && now-helperStartedAt>(headTracking ? 35:20){
             fail("No fresh motion arrived. Open the lid, wake one earbud, then reconnect.");return
         }
         if stopping && stoppedAt>0 && now-stoppedAt>3{if !signalled{signalled=true;helper?.terminate()};return}
@@ -924,6 +928,20 @@ final class ClosedCaseSession: NSObject {
         guard let bounds=pointerBounds(),
               let event=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:screenPoint(smooth,bounds:bounds),mouseButton:.left) else{pause();return}
         event.post(tap:.cghidEventTap)
+    }
+    // A key that clicks where the case points, for when a tap doesn't register: AirPods 4 send motion 25 to 100 times
+    // a second rather than 200, so a short tap can fall between readings. The right ⌥ key types nothing, so it can't
+    // land in the game or a text field, and it only clicks while pointing is on.
+    private func watchClickKey(){
+        guard clickKeyMonitor==nil else{return}
+        clickKeyMonitor=NSEvent.addGlobalMonitorForEvents(matching:.flagsChanged){[weak self] event in
+            guard event.keyCode==61,event.modifierFlags.contains(.option) else{return}
+            DispatchQueue.main.async{
+                guard let self,self.enabled else{return}
+                self.postClick(self.smooth)
+                if self.clickSound{TapClickSound.shared.play()}
+            }
+        }
     }
     private func postClick(_ point:CGPoint){
         guard let bounds=pointerBounds() else{pause();return}

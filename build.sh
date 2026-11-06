@@ -43,3 +43,5 @@ codesign --force --sign "$airpointer_signing_identity" --timestamp=none AirPoint
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$PWD/AirPointer.app"
 AirPointer.app/Contents/MacOS/AirPointer --self-test
 AirPointer.app/Contents/MacOS/AirPointer --check-closed-case-tap Tests/TapFixtures.csv
+# The motion helper's offline checks, including AirPods 4 head tracking decoded from recorded packets. No Bluetooth.
+AirPointer.app/Contents/Resources/ClosedCaseMotion.bin --self-test | tail -1

@@ -13,9 +13,12 @@ struct ClosedCaseAirPods:Equatable {
     var productID:UInt16=0
     var title:String{name.localizedCaseInsensitiveContains(model) ? name:"\(name) · \(model)"}
     // Tested with AirPods Pro 3. AirPods Pro 2 share the case the pointer talks to.
-    // AirPods 4 are experimental: 0x201b is AirPods 4 (ANC); 0x2019 is believed to be AirPods 4.
+    // AirPods 4 (0x2019, confirmed on a real pair) and AirPods 4 with ANC (0x201b).
     static let models=["0x2014":"AirPods Pro 2","0x2024":"AirPods Pro 2","0x2027":"AirPods Pro 3",
                        "0x2019":"AirPods 4","0x201b":"AirPods 4 (ANC)"]
+    // AirPods 4 stream head tracking (sensor service 16) instead of the raw motion AirPods Pro send.
+    // The helper turns it into the same rows when the app passes --head-tracking.
+    static let headTrackingModels:Set<UInt16>=[0x2019,0x201B]
     static let targetURL=airPointerDataFolder.appendingPathComponent("closed-case-target.txt")
 
     enum Choice:Equatable {
