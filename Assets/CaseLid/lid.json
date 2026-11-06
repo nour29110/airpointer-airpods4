@@ -1,0 +1,180 @@
+{
+  "source": "https://www.apple.com/105/media/us/airpods-pro/2025/7acffb13-4adb-40b1-9393-8f1c99bc6c90/ar/airpods-pro.usdz",
+  "sourceSHA256": "e39e77471fb84c60c12d14f5449df4f0f4a0dffc281ba3f7ab1068db13164f2a",
+  "view": "front, landscape, lid easing (cosine in-out) from open (00) to closed (11); status light fades in over the last two frames",
+  "camera": {
+    "type": "orthographic",
+    "location": [
+      0.0,
+      -11.737772,
+      2.01494
+    ],
+    "target": [
+      0.0,
+      0.0,
+      -0.48
+    ],
+    "up": [
+      0.0,
+      0.207912,
+      0.978148
+    ],
+    "elevationDegrees": 12.0,
+    "orthoScale": 4.4,
+    "note": "Shared by case-open, case-closed, case-pointer, lid/* and spin/*; world units are the USD scene x50, case is 3.10 wide."
+  },
+  "statusLightColor": "#30D158",
+  "size": [
+    600,
+    600
+  ],
+  "samples": 128,
+  "frames": [
+    {
+      "file": "lid-00.png",
+      "lidAngleDegrees": 115.0,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5566666666666666,
+        "radius": 0.42690911080567123
+      },
+      "renderSeconds": 2.8,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-01.png",
+      "lidAngleDegrees": 112.671,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5566666666666666,
+        "radius": 0.4273383385042297
+      },
+      "renderSeconds": 2.8,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-02.png",
+      "lidAngleDegrees": 105.872,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5575,
+        "radius": 0.427090447095226
+      },
+      "renderSeconds": 2.4,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-03.png",
+      "lidAngleDegrees": 95.154,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5575,
+        "radius": 0.4238292698717256
+      },
+      "renderSeconds": 2.5,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-04.png",
+      "lidAngleDegrees": 81.386,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5566666666666666,
+        "radius": 0.4179397218632265
+      },
+      "renderSeconds": 2.4,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-05.png",
+      "lidAngleDegrees": 65.683,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5525,
+        "radius": 0.41121179322690743
+      },
+      "renderSeconds": 2.6,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-06.png",
+      "lidAngleDegrees": 49.317,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5441666666666667,
+        "radius": 0.4033755143232613
+      },
+      "renderSeconds": 2.8,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-07.png",
+      "lidAngleDegrees": 33.614,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5316666666666666,
+        "radius": 0.3956306498631156
+      },
+      "renderSeconds": 4.3,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-08.png",
+      "lidAngleDegrees": 19.846,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.52,
+        "radius": 0.38852463099382634
+      },
+      "renderSeconds": 2.6,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-09.png",
+      "lidAngleDegrees": 9.128,
+      "statusLightLevel": 0.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5091666666666667,
+        "radius": 0.38265973425776356
+      },
+      "renderSeconds": 2.5,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-10.png",
+      "lidAngleDegrees": 2.329,
+      "statusLightLevel": 0.5,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5025,
+        "radius": 0.3792362573500705
+      },
+      "renderSeconds": 3.8,
+      "lidEarbudTriangleOverlaps": 0
+    },
+    {
+      "file": "lid-11.png",
+      "lidAngleDegrees": 0.0,
+      "statusLightLevel": 1.0,
+      "silhouette": {
+        "x": 0.5,
+        "y": 0.5,
+        "radius": 0.37800095531919264
+      },
+      "renderSeconds": 3.8,
+      "lidEarbudTriangleOverlaps": 0
+    }
+  ],
+  "device": "METAL Apple M3 Pro (GPU - 14 cores)",
+  "renderer": "5.3.0 Beta"
+}

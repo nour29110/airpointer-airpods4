@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Build output (recreated by ./build.sh)
+AirPointer.app/
+
+# Generated renders
+work/
+__pycache__/
+*.pyc
