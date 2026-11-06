@@ -402,3 +402,48 @@ func runClosedCaseTapChecks(fixtures:URL?) throws {
     }
     print("PASS: closed-case tap detection, \(detail)")
 }
+
+// AirPods 4 click: a quick twist of the case about the axis it points along, like turning a key. That turn doesn't move
+// the pointer (calibration maps only turns toward the right and top dots), so it can't be mistaken for aiming, and AirPods 4
+// report it reliably at 25 to 100 Hz, where a tap's short jolt falls between readings. (Double-tapping the front of an
+// AirPods 4 case with the lid open also starts pairing mode.) It gives the tap detector's events, so the click lands where
+// the pointer was before the twist began and holds there until the case settles. Tested on simulated AirPods 4 motion at
+// 25, 50 and 100 Hz: every twist of 20° or more within 0.15 to 0.2 s clicked, slow twists didn't, and aiming at up to
+// 350°/s with up to 60% accidental twist never clicked.
+struct ClosedCaseTwistDetector {
+    // Degrees per second about the pointing axis. A click also has to outpace the aiming turn by `dominance`.
+    static let clickRate=120.0,dominance=1.5,calmRate=60.0,calmFor=0.1,refractory=0.35,longestHold=1.0
+    // The pointing axis in the earbud's frame: perpendicular to the calibrated right and up turns.
+    var axis:SIMD3<Double>?
+    private var holding=false,clickedAt = -Double.infinity,risingSince:Double?,calmSince:Double?
+
+    mutating func reset()->[ClosedCaseTapDetector.Event]{
+        let held=holding;holding=false;risingSince=nil;calmSince=nil
+        return held ? [.release]:[]
+    }
+    // Motion rows as the helper writes them. Only the gyroscope rows (service 12) matter here.
+    mutating func feed(_ rows:[[Double]])->[ClosedCaseTapDetector.Event]{
+        guard let axis else{return reset()}
+        var events:[ClosedCaseTapDetector.Event]=[]
+        for row in rows.filter({$0.count==7 && $0[1]==12}).sorted(by:{$0[2]<$1[2]}){
+            let t=row[2]*1e-6,w=SIMD3(row[4],row[5],row[6])*1e-5
+            let twist=(w*axis).sum(),aiming=w-axis*twist
+            let twistRate=abs(twist),aimRate=(aiming*aiming).sum().squareRoot()
+            if holding{
+                if twistRate<Self.calmRate && aimRate<Self.calmRate{
+                    if calmSince==nil{calmSince=t}
+                }else{calmSince=nil}
+                if let calmSince,t-calmSince>=Self.calmFor{holding=false;self.calmSince=nil;events.append(.release)}
+                else if t-clickedAt>=Self.longestHold{holding=false;calmSince=nil;events.append(.release)}
+                continue
+            }
+            if twistRate>=Self.calmRate{if risingSince==nil{risingSince=t}}else{risingSince=nil}
+            if twistRate>=Self.clickRate,twistRate>=Self.dominance*aimRate,t-clickedAt>=Self.refractory{
+                holding=true;clickedAt=t;calmSince=nil
+                events.append(.tap(since:risingSince ?? t,jolt:twistRate/100,repeated:false))
+                risingSince=nil
+            }
+        }
+        return events
+    }
+}

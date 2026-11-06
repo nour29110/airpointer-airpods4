@@ -953,7 +953,9 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
             }
             if(!fresh) {[transfer fail:HelperExitMotionStale reason:@"Motion stopped arriving"];reason=transfer.error;break;}
         }
-        if(transfer.rootVerified && !discoverySent) {
+        // AirPods 4 point with the lid open and stay connected on their own, so in head-tracking mode nothing
+        // is sent to the case: without discovery its endpoint is never announced, identified or asked for records.
+        if(transfer.rootVerified && !discoverySent && !headTrackingMode) {
             discoverySent=[transfer sendRoot:0x15 body:NSData.data];
             if(!discoverySent) [transfer fail:HelperExitWriteFailed reason:@"root discovery write failed"];
         }

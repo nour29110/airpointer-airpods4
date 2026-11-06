@@ -519,7 +519,7 @@ final class ClosedCaseSession: NSObject {
     private var smooth=CGPoint(x:0.5,y:0.5), feedError:String?
     private var pointerFilter=ClosedCasePointerFilter()
     // AirPods 4: the helper streams head tracking as raw motion (--head-tracking). The right ⌥ key also clicks.
-    private var headTracking=false,clickKeyMonitor:Any?
+    private var headTracking=false,clickKeyMonitor:Any?,twistDetector=ClosedCaseTwistDetector()
     private var readStats=(count:0,total:0.0,longest:0.0,since:0.0)
     private var tapDetector=ClosedCaseTapDetector(),recentPoints:[(t:Double,point:CGPoint)]=[],tapHold:CGPoint?
     private var lastClick:(uptime:Double,position:CGPoint,count:Int64)?
@@ -790,7 +790,8 @@ final class ClosedCaseSession: NSObject {
         ready = !stopping && !confirmed && connected && (state["open_baseline_verified"] as? Bool == true) && 
             (cs["root_identity_verified"] as? Bool == true)
         if ready && !loggedReady{loggedReady=true;step("close lid shown")}
-        if ready,helper?.isRunning == true,closedCaseLidClosed(closedCaseInCaseReports(state["earbud_state_events"])){
+        // AirPods 4 point with the lid open (closing it ends their connection), so they don't wait for it to close.
+        if ready,helper?.isRunning == true,headTracking || closedCaseLidClosed(closedCaseInCaseReports(state["earbud_state_events"])){
             confirmClosed()
         }
         if !stopping && confirmed{
@@ -819,7 +820,13 @@ final class ClosedCaseSession: NSObject {
             }
             guard !rows.isEmpty else{return}
             defer{noteRead(from:readAt)}
-            let tapEvents=tapLearner==nil && enabled && calibrated ? tapDetector.feed(rows):tapDetector.reset()
+            let tapEvents:[ClosedCaseTapDetector.Event]
+            if headTracking{
+                twistDetector.axis=calibrated ? pointingAxis():nil
+                tapEvents=enabled && calibrated ? twistDetector.feed(rows):twistDetector.reset()
+            }else{
+                tapEvents=tapLearner==nil && enabled && calibrated ? tapDetector.feed(rows):tapDetector.reset()
+            }
             for event in tapLearner?.feed(rows) ?? []{
                 if case .tap=event,clickSound{TapClickSound.shared.play()}
                 try? log?.write(contentsOf:Data("TAPLEARN \(event)\n".utf8))
@@ -928,6 +935,13 @@ final class ClosedCaseSession: NSObject {
         guard let bounds=pointerBounds(),
               let event=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:screenPoint(smooth,bounds:bounds),mouseButton:.left) else{pause();return}
         event.post(tap:.cghidEventTap)
+    }
+    // The axis the case points along, in the earbud's frame: perpendicular to the calibrated right and up turns.
+    private func pointingAxis()->SIMD3<Double>?{
+        guard let edges=motion?.gripEdges,let r=edges["right"] as? [Double],let u=edges["up"] as? [Double],r.count==3,u.count==3 else{return nil}
+        let n=SIMD3(r[1]*u[2]-r[2]*u[1],r[2]*u[0]-r[0]*u[2],r[0]*u[1]-r[1]*u[0])
+        let length=(n*n).sum().squareRoot()
+        return length>1e-9 ? n/length:nil
     }
     // A key that clicks where the case points, for when a tap doesn't register: AirPods 4 send motion 25 to 100 times
     // a second rather than 200, so a short tap can fall between readings. The right ⌥ key types nothing, so it can't
