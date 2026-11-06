@@ -222,6 +222,11 @@ static NSString *hexString(NSData *data) {
 @property NSUInteger accelReports,gyroReports,accelFresh,gyroFresh;
 @property NSMutableSet *seenShapes;
 @property NSUInteger repliesLogged,otherReportsLogged;
+// AirPods 4: service 16 is the head-tracking stream (LibrePods' "alternate" start). Its 58-byte
+// report starts with 01 and carries the earbud's own fused orientation as a Q15 quaternion
+// vector (x, y, z) at bytes 20-25; the scalar part is implied, w = sqrt(1 - |v|^2).
+@property NSUInteger headReports;
+@property NSData *lastHead;
 @end
 @implementation ConsoleReader
 - (instancetype)init { if ((self = [super init])) { self.buffer = NSMutableData.data; self.uarpMessages = NSMutableArray.array;self.earbudStateEvents=NSMutableArray.array;self.lastSamples=NSMutableDictionary.dictionary;self.phase=@"open_baseline";self.seenShapes=NSMutableSet.set; } return self; }
@@ -307,6 +312,7 @@ static NSString *hexString(NSData *data) {
                         }
                         [self noteShape:[NSString stringWithFormat:@"opcode=0x17 service=%@ report_length=%lu first_byte=%u",service?service.stringValue:@"none",(unsigned long)report.length,(unsigned)(report.length?((const uint8_t *)report.bytes)[0]:0)]];
                         if([service unsignedIntValue]==11 || [service unsignedIntValue]==12) rawMotion=YES;
+                        if([service unsignedIntValue]==16 && report.length>=26 && ((const uint8_t *)report.bytes)[0]==1) {self.headReports++;self.lastHead=report;}
                         else if(report && self.otherReportsLogged<8) {self.otherReportsLogged++;printf("MOTION REPORT uptime=%.6f service=%s length=%lu hex=%s\n",NSProcessInfo.processInfo.systemUptime,service?service.stringValue.UTF8String:"none",(unsigned long)report.length,hexString(report).UTF8String);}
                         if(([service unsignedIntValue]==11 || [service unsignedIntValue]==12) && report.length==28) {
                             const uint8_t *r=report.bytes;uint64_t stamp=le32(r+20) | (uint64_t)le32(r+24)<<32;
@@ -756,6 +762,12 @@ static NSData *sensorSetting(uint8_t service,uint32_t interval) {
     uint16_t n=message.length;uint8_t header[]={4,0,4,0,0x17,0,0,0,0x10,0,(uint8_t)n,(uint8_t)(n>>8)};
     NSMutableData *data=[NSMutableData dataWithBytes:header length:sizeof(header)];[data appendData:message];return data;
 }
+// One Q15 channel of the newest service 16 report, or 0 when there is none.
+static int headQ(NSData *report,int axis) {
+    if(report.length<26) return 0;
+    const uint8_t *r=report.bytes;
+    return (int16_t)(r[20+2*axis] | r[21+2*axis]<<8);
+}
 static NSArray *sensorStatus(ConsoleReader *reader,double now) {
     NSMutableArray *sensors=NSMutableArray.array;
     for(NSString *key in @[@"11",@"12"]) {
@@ -823,7 +835,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     if(setup) setup=sendPacket(output,packet(notifications,sizeof(notifications)),"known notifications");
     if(setup) receiveUntilAnswered(reader,input,.5,7,2);
     step("session setup answered");
-    BOOL headAttempted=NO,sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
+    double lastStartAt=0;NSUInteger restarts=0;BOOL headAttempted=NO,sensorsStarted=NO,accelStarted=NO,gyroStarted=NO,accelAttempted=NO,gyroAttempted=NO,queryPending=NO,stopped=NO,discoverySent=NO,baselineVerified=NO,motionInputVerified=NO;NSUInteger processed=0,responses=0,queries=0,rootStartupQueries=0,rootUnanswered=0;
     CaseSnapshot *transfer=CaseSnapshot.new;transfer.output=output;transfer.targetBound=YES;double nextQuery=0,lastRootQueryAt=0;
     int exitCode=HelperExitOK;NSString *reason=@"deadline";
     NSURL *leaseURL=[directory.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"app-lease.txt"];
@@ -832,6 +844,9 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     else if(!reader.controls) {exitCode=HelperExitNoSessionReply;reason=@"AACP channel opened but nothing answered the session setup";}
     else if(!sessionLeaseFresh(leaseURL,NSProcessInfo.processInfo.systemUptime)) {stopped=YES;exitCode=HelperExitLeaseExpired;reason=@"app session lease expired before sensors started";}
     else {
+        headAttempted=YES;lastStartAt=NSProcessInfo.processInfo.systemUptime;
+        if(!sendPacket(output,sensorSetting(16,40000),"AirPods 4: head tracking start (service 16)")) printf("AirPods 4: head tracking start write failed\n");
+        pump(.2);
         accelAttempted=YES;accelStarted=sendPacket(output,sensorSetting(11,5000),"known accel");pump(.2);
         gyroAttempted=YES;gyroStarted=sendPacket(output,sensorSetting(12,5000),"known gyro");
         sensorsStarted=accelStarted && gyroStarted;
@@ -908,14 +923,16 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
                 @"sensors":sensors,@"earbud_state_events":[reader.earbudStateEvents copy],@"case_snapshot":[transfer status]};
             if(![[NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:nil] writeToURL:[directory URLByAppendingPathComponent:@"status.json"] atomically:YES]) {[transfer fail:HelperExitCaptureWrite reason:@"status write failed"];reason=transfer.error;break;}
             NSDictionary *latest=reader.lastSamples[@"11"];
-            printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu gyro=%lu arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,(unsigned long)reader.gyroReports,latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
+            printf("HOLD phase=%s seconds=%.1f versions=%lu/%lu accel=%lu gyro=%lu ht=%lu q=%d,%d,%d arrival_minus_sensor=%.3f\n",reader.phase.UTF8String,now-began,responses,queries,(unsigned long)reader.accelReports,(unsigned long)reader.gyroReports,(unsigned long)reader.headReports,headQ(reader.lastHead,0),headQ(reader.lastHead,1),headQ(reader.lastHead,2),latest?[latest[@"received_uptime"] doubleValue]-[latest[@"sensor_us"] doubleValue]*1e-6:0);nextStatus=now+1;
         }
         if(input.streamStatus==NSStreamStatusError || input.streamStatus==NSStreamStatusAtEnd) {reason=@"input ended";exitCode=HelperExitInputEnded;break;}
-        if(!headAttempted && now-began>4 && reader.accelReports==0 && reader.gyroReports==0) {
-            headAttempted=YES;
-            if(!sendPacket(output,sensorSetting(14,40000),"AirPods 4 probe: head tracking (service 14)")) printf("AirPods 4 probe: head tracking start write failed\n");
+        if(headAttempted && now-lastStartAt>=4 && restarts<24) {
+            lastStartAt=now;
+            if(reader.headReports==0) {restarts++;if(!sendPacket(output,sensorSetting(16,40000),"AirPods 4: head tracking start again (service 16)")) printf("AirPods 4: head tracking restart write failed\n");}
+            if(reader.accelReports==0 && reader.gyroReports==0) {restarts++;sendPacket(output,sensorSetting(11,5000),"known accel again");sendPacket(output,sensorSetting(12,5000),"known gyro again");}
         }
-        if(now-began>15 && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
+        // AirPods 4 diagnosis: a longer window, so one run can try the earbuds in the case, in a hand and back.
+        if(now-began>45 && !motionInputVerified) {[transfer fail:HelperExitBaselineUnavailable reason:@"open baseline unavailable"];reason=transfer.error;break;}
         if(now-began>160 && !baselineVerified) {[transfer fail:HelperExitIdentityUnavailable reason:@"motion arrived but diagnostic identity remained unavailable"];reason=transfer.error;break;}
     }
     } // Drain temporary objects on each live receive cycle.
@@ -931,7 +948,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
     // 1. Sensor STOP, then (2) the scoped Abandon of this exact live offered
     // asset. Abandon can consume the case's staged analytics; see beginCleanup.
     BOOL accelStopped=NO,gyroStopped=NO;
-    if(headAttempted && !sendPacket(output,sensorSetting(14,0),"AirPods 4 probe: head tracking STOP")) printf("AirPods 4 probe: head tracking STOP write failed\n");
+    if(headAttempted && !sendPacket(output,sensorSetting(16,0),"AirPods 4: head tracking STOP (service 16)")) printf("AirPods 4: head tracking STOP write failed\n");
     stopSensorsThenRelease(output,transfer,accelAttempted,gyroAttempted,&accelStopped,&gyroStopped);
     // On a channel the link already ended a STOP cannot be delivered; the
     // dropped link stays the reported cause (the log line below still shows it).

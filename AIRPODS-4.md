@@ -38,3 +38,12 @@ AirPointer works by keeping the earbuds' motion sensors streaming while they sit
 | 36 | The case refused the request that keeps it awake. |
 
 The original README's warnings still apply: each session uses up the case's stored diagnostic records, some AirPods connection settings stay as the session set them, and the Bluetooth link drops for a moment when connecting. The helper's own notes say it sends no firmware, configuration or security writes to the AirPods.
+
+## Findings so far (tested on AirPods 4, product ID 0x2019, firmware 9A348)
+
+- The connection, setup and UARP check-ins all work.
+- AirPods 4 acknowledge requests for sensor services 11 and 12 (raw accelerometer and gyroscope, which AirPods Pro stream) and 14 (LibrePods' original head tracking), but never send a reading. Two other projects document the same behavior.
+- AirPods 4 stream head tracking on service **16** (LibrePods' "alternate" start). Each report is 58 bytes, starts with `01`, and holds the earbud's fused orientation as a Q15 quaternion vector at bytes 20–25 (w is implied).
+- AirPods only stream while they consider themselves in use. Kinapod streams from a bare AirPod off-ear with Automatic Ear Detection off and the microphone fixed to one bud. Whether that also works with the buds docked in the case is the open question this build tests.
+
+Sources: LibrePods (`AACPManager.kt`, docs), pods-head-tracker (`opentrack_bridge.py`), airpods-head-track (`aacp.rs`, `head_tracking.rs`), kinapod.com/technology.

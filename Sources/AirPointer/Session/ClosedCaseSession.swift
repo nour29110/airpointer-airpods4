@@ -754,7 +754,7 @@ final class ClosedCaseSession: NSObject {
         let now=ProcessInfo.processInfo.systemUptime
         if isActive && !stopping{do{try renewSessionLease()}catch{fail("Couldn’t keep the pointer connection active.");return}}
         if bootstrap?.isRunning == true && now-startedAt>30{feedError="AirPods did not connect. Open the lid, wake one earbud, then reconnect.";stop();return}
-        if !stopping && helper?.isRunning == true && !confirmed && lastHost==0 && now-helperStartedAt>20{
+        if !stopping && helper?.isRunning == true && !confirmed && lastHost==0 && now-helperStartedAt>50{
             fail("No fresh motion arrived. Open the lid, wake one earbud, then reconnect.");return
         }
         if stopping && stoppedAt>0 && now-stoppedAt>3{if !signalled{signalled=true;helper?.terminate()};return}
