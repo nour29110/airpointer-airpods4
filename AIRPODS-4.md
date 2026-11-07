@@ -30,27 +30,42 @@ AirPods 4 ignore a start they can't act on, so until reports arrive the helper a
 
 **Closed:** when the lid closes while you're pointing, AirPointer tries to keep the closed case awake the way it does for AirPods Pro. A closed case ends its link to the earbuds after 3.5 s of idle firmware-update traffic (UARP), so the helper asks the case for its diagnostic records (MTIC) and holds them, which keeps that traffic busy. Like AirPods Pro, this uses up the case's stored diagnostic records.
 
-The AirPods 4 case answers this only once the lid is closed, and it reports a different model name than the AirPods Pro case (the session log shows it). The rest of the exchange was tuned on the AirPods Pro 3 case, so it may not hold:
+The AirPods 4 case answers this only once the lid is closed, and it reports a different model name than the AirPods Pro case (the session log shows it). The rest of the exchange was tuned on the AirPods Pro 3 case. On the tested AirPods 4 it holds, but on other firmware it may not:
 
-- If the case cooperates and the earbuds keep streaming, pointing carries on with the lid closed. AirPods Pro sessions end about 30 minutes after the lid closes, and AirPods 4 likely do too.
+- If the case cooperates and the earbuds keep streaming, pointing carries on with the lid closed, as it does on the tested pair. AirPods Pro sessions end about 30 minutes after the lid closes, and AirPods 4 likely do too.
 - If not, the case is set aside rather than ending the session, and the link drops when the lid closes. AirPointer then waits for the lid to open and reconnects by itself.
 
 The app ignores in-case reports from the first 3 seconds after connecting: AirPods 4 send a burst then that can read as a lid closing.
 
-## Clicking: twist the case
+## Clicking
 
-Twist the case quickly about the axis it points along, like turning a key, about 20° or more. That turn doesn't move the pointer, because calibration maps only turns toward the right and top dots. The click lands where the pointer was just before the twist, and the pointer holds still until the case settles.
+**Press the front of the case**, where its light is, like pressing a button. Hold the case still for a moment first: a press while you're still aiming doesn't click. The click lands where the pointer was just before the press, and the pointer holds still from the moment the press arrives until the case settles, so the press doesn't nudge your aim.
 
-Taps don't work on AirPods 4. Their readings are smoothed, and 25 to 100 a second rather than 200, so a tap's short jolt falls between them. Double-tapping the front of an AirPods 4 case with the lid open also starts pairing mode. Skip the tap step in setup ("Skip for Now").
+A press turns the case a little in your hand: a few degrees within a hundredth of a second, mostly about the axis it points along, and then it springs back. Aiming turns the case smoothly instead. In a recording of 27 presses on a closed case held in the hand, aiming never sped the case up by more than 30°/s along the press direction from one reading to the next, and a press sped it up by 40 to 300°/s. So a press has to:
+
+- come from a still case (35°/s at most, 30 to 150 ms before),
+- speed the case up by 40°/s or more along the press direction within one reading,
+- peak along that direction, and
+- fall back to half its peak within 35 ms.
+
+The press direction is in the streaming earbud's frame, and it adjusts to your presses. If the other earbud streams, its frame is different: three firm presses that agree teach it the new direction, and the third one clicks.
+
+Presses need about 100 readings a second, which AirPods 4 send when they can. At 50 a second the softest presses are missed, and at 25 presses don't click at all.
+
+**Twisting still clicks:** twist the case quickly about the axis it points along, like turning a key, about 20° or more. That turn doesn't move the pointer, because calibration maps only turns toward the right and top dots. A firm press is a small, quick twist too, so whichever one notices it first clicks, and one press always clicks once.
 
 **The right ⌥ key also clicks** wherever the case points, while pointing is on. It types nothing, so it can't land in a game or a text field.
 
+AirPods Pro taps don't work on AirPods 4. Their readings are smoothed, and 25 to 100 a second rather than 200, so a tap's short jolt falls between them. Skip the tap step in setup ("Skip for Now"). With the lid open, double-tapping the front of an AirPods 4 case also starts pairing mode, so press with the lid closed.
+
 ## Checks
 
-- `build.sh` runs the helper's offline self-test, which decodes two real AirPods 4 packets: 1 g at rest, almost no turning, correct timestamps, and no translation for AirPods Pro.
+- `build.sh` runs the helper's offline self-test, which decodes two real AirPods 4 packets: 1 g at rest, almost no turning, correct timestamps, and no translation for AirPods Pro. An earbud's first reports, sent before its own fusion starts, have a zero orientation. They read as no turn, so the first real orientation doesn't read as a spin of thousands of degrees a second.
+- The app's self-test checks press clicks on synthetic AirPods 4 motion. A press from a still case clicks once, at 50 and 100 readings a second, however the readings are batched, and holds the pointer from its start. Aiming, a press while aiming, jolts from other directions, slow turns and presses right after a gap don't click. Three presses in a new direction teach it, and a press that is also a twist clicks once.
+- Press clicks on the recording (125 s at 99 readings a second): all 27 presses in the press stretches clicked, plus 2 in a mixed stretch, and about 70 s of aiming and handling never clicked. Aiming and handling still never clicked with the stillness limit anywhere from 25 to 40°/s and the jump anywhere from 40 to 60°/s (at 50°/s, 25 of the 27 presses clicked). With 5% of readings lost at random, 98% of presses clicked and nothing else did. The Swift detector and a Python model of it gave the same clicks at the same times.
 - A simulation fed an AirPods 4 stream through this translation into AirPointer's own `Orientation.js` and `Grip`. Over 20 seconds of turning, including four sign flips, it tracked the true orientation within 0.5° at 25, 50 and 100 Hz, and the pointer landed within 0.02% of the screen of the true position.
 - The twist click, on the same simulated stream at 25, 50 and 100 Hz: every quick twist of 20° or more clicked, slow twists didn't, and 40 seconds of aiming at up to 350°/s, with up to 60% accidental twist, never clicked.
-- On a real pair: AirPods 4 stream with the lid open, and pointing and calibration worked.
+- On a real pair: AirPods 4 stream with the lid open and closed, and pointing, calibration and twist clicks worked. The press recording came from that pair, through `defaults write local.airpointer recordMotion -bool true`, which saves each session's motion as `motion-rows.csv` in its session folder (`defaults delete local.airpointer recordMotion` stops it).
 
 ## Notes
 

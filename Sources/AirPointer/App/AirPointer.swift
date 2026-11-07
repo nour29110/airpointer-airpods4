@@ -183,8 +183,9 @@ if CommandLine.arguments.contains("--check-audio-output-policy") {
     do{try runPointerSettingsChecks()}catch{fputs("Pointer settings check failed: \(error.localizedDescription)\n",stderr);exit(1)}
     do{try runClosedCaseStageChecks()}catch{fputs("Closed-case stage check failed: \(error.localizedDescription)\n",stderr);exit(1)}
     do{try runClosedCaseTapChecks(fixtures:nil)}catch{fputs("Closed-case tap check failed: \(error.localizedDescription)\n",stderr);exit(1)}
+    do{try runClosedCasePressChecks()}catch{fputs("AirPods 4 press check failed: \(error.localizedDescription)\n",stderr);exit(1)}
     do{try runTapTestChecks()}catch{fputs("Tap test check failed: \(error.localizedDescription)\n",stderr);exit(1)}
-    print("PASS: audio output policy, screen mapping, pose math, pointer settings, session stages, closed-case tap detection and the tap test")
+    print("PASS: audio output policy, screen mapping, pose math, pointer settings, session stages, closed-case tap detection, AirPods 4 press clicks and the tap test")
 } else {
     let app = NSApplication.shared
     let delegate = App()

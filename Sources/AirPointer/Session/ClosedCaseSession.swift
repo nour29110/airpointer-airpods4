@@ -518,8 +518,9 @@ final class ClosedCaseSession: NSObject {
     private var generation=0, lastStatus=0.0, lastHost=0.0, pressedAt=0.0, loggedReady=false
     private var smooth=CGPoint(x:0.5,y:0.5), feedError:String?
     private var pointerFilter=ClosedCasePointerFilter()
-    // AirPods 4: the helper streams head tracking as raw motion (--head-tracking). The right ⌥ key also clicks.
-    private var headTracking=false,clickKeyMonitor:Any?,twistDetector=ClosedCaseTwistDetector()
+    // AirPods 4: the helper streams head tracking as raw motion (--head-tracking). A press on the front of the case
+    // or a twist clicks, and so does the right ⌥ key.
+    private var headTracking=false,clickKeyMonitor:Any?,clicks=ClosedCaseHeadTrackingClicks()
     // AirPods 4: set once the lid closes while pointing, when the helper starts talking to the case.
     private var caseWindowOpened=false
     private var readStats=(count:0,total:0.0,longest:0.0,since:0.0)
@@ -834,8 +835,8 @@ final class ClosedCaseSession: NSObject {
             defer{noteRead(from:readAt)}
             let tapEvents:[ClosedCaseTapDetector.Event]
             if headTracking{
-                twistDetector.axis=calibrated ? pointingAxis():nil
-                tapEvents=enabled && calibrated ? twistDetector.feed(rows):twistDetector.reset()
+                clicks.twist.axis=calibrated ? pointingAxis():nil
+                tapEvents=enabled && calibrated ? clicks.feed(rows):clicks.reset()
             }else{
                 tapEvents=tapLearner==nil && enabled && calibrated ? tapDetector.feed(rows):tapDetector.reset()
             }
@@ -851,6 +852,8 @@ final class ClosedCaseSession: NSObject {
             for event in tapEvents{
                 switch event {
                 case .release:tapHold=nil
+                // An AirPods 4 press being judged: hold the pointer where it was, so the press can't nudge it.
+                case .hold(let since):tapHold=recentPoints.last{$0.t<since}?.point ?? smooth
                 case .tap(let since,let jolt,let repeated):
                     let at=recentPoints.last{$0.t<since}?.point ?? smooth;tapHold=at
                     if enabled{

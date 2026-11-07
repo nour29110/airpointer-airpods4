@@ -13,7 +13,9 @@ import Foundation
 struct ClosedCaseTapDetector {
     // tap: click where the pointer was before `since` (sensor seconds), and keep it there through the wobble.
     // repeated means it counted only because it came soon after another tap. release: the pointer can move again.
-    enum Event:Equatable{case tap(since:Double,jolt:Double,repeated:Bool),release}
+    // hold: keep the pointer where it was before `since` while a possible click is judged, without clicking (AirPods 4
+    // presses only); a tap or a release follows.
+    enum Event:Equatable{case tap(since:Double,jolt:Double,repeated:Bool),hold(since:Double),release}
     // Accelerations in g, rotation in degrees per second, times in seconds, so any sample rate works.
     static let jolt=0.2,softJolt=0.12,repeatJolt=0.22,stillAcceleration=0.08,minimumAlignment=0.9
     static let stillRotation=40.0,calmLead=30.0,leadRotation=60.0,calmRepeat=45.0,repeatRotation=90.0,fastRotation=35.0,runStartRotation=150.0
@@ -228,7 +230,7 @@ func runClosedCaseTapChecks(fixtures:URL?) throws {
     func balanced(_ events:[ClosedCaseTapDetector.Event])->Bool{
         var held=false
         for event in events{
-            switch event{case .tap:if held{return false};held=true;case .release:if !held{return false};held=false}
+            switch event{case .tap:if held{return false};held=true;case .hold:return false;case .release:if !held{return false};held=false}
         }
         return !held
     }
@@ -446,4 +448,209 @@ struct ClosedCaseTwistDetector {
         }
         return events
     }
+}
+
+// AirPods 4 click: a press on the front of the case, where its light is. In 27 presses recorded on a closed case held in
+// the hand (100 readings a second), each turned the case 1 to 6° within a reading or two, mostly about the axis it points
+// along, fell back to half that speed within 35 ms and sprang back over the next 100 to 300 ms. Aiming turns the case
+// smoothly instead: from a still case it never sped up more than 30°/s along the press direction from one reading to the
+// next, where a press sped up 40 to 300°/s. So a press has to come from a still case (35°/s at most, 30 to 150 ms before),
+// speed up 40°/s or more along the press direction in one reading, peak along it, and fall back to half its peak within
+// 35 ms. The pointer holds from the reading the press arrives in, so the press doesn't nudge it, and the click lands where
+// it was just before. The press direction is in the earbud's frame and follows this case's presses. If the other earbud
+// streams, its frame differs: three firm presses that agree teach the new direction, and the third clicks.
+// At 50 readings a second the softest presses are missed, and at 25 a press can't be told from aiming, so it doesn't click.
+struct ClosedCasePressDetector {
+    // Rotation in degrees per second, times in seconds.
+    static let clickJump=40.0,relearnJump=90.0,calmRate=35.0,calmFrom=0.15,calmTo=0.03,calmReadings=4,longestStep=0.025
+    static let narrow=0.5,peakWithin=0.035,minimumAlignment=0.3,refractory=0.25
+    // After a click the pointer is let go once the case has turned less than releaseRate for releaseFor, or after longestHold.
+    static let releaseRate=30.0,releaseFor=0.08,longestHold=0.6
+    static let adaptRate=0.15,adaptAlignment=0.6,relearnAgreement=0.8,relearnCount=3,relearnWithin=30.0
+    // The way a press on the front turned the recorded earbud.
+    static let pressDirection=unit(SIMD3(-0.2,0.85,0.48))
+    private(set) var direction=Self.pressDirection
+    private var recent:[(t:Double,w:SIMD3<Double>)]=[]
+    private var candidate:(since:Double,peak:Double,peakAt:Double,peakW:SIMD3<Double>,rise:Double,along:Bool)?
+    private var holding=false,clickedAt = -Double.infinity,calmSince:Double?
+    private var strays:[(t:Double,way:SIMD3<Double>)]=[]
+
+    static func length(_ v:SIMD3<Double>)->Double{(v*v).sum().squareRoot()}
+    static func unit(_ v:SIMD3<Double>)->SIMD3<Double>{let n=length(v);return n>1e-12 ? v/n:v}
+    // Starting over lets go of a held pointer.
+    mutating func reset()->[ClosedCaseTapDetector.Event]{
+        let held=holding || candidate != nil
+        recent=[];candidate=nil;holding=false;calmSince=nil
+        return held ? [.release]:[]
+    }
+    // Motion rows as the helper writes them. Only the gyroscope rows (service 12) matter here.
+    mutating func feed(_ rows:[[Double]])->[ClosedCaseTapDetector.Event]{
+        rows.filter{$0.count==7 && $0[1]==12}.sorted{$0[2]<$1[2]}.flatMap{feed(t:$0[2]*1e-6,w:SIMD3($0[4],$0[5],$0[6])*1e-5)}
+    }
+    mutating func feed(t:Double,w:SIMD3<Double>)->[ClosedCaseTapDetector.Event]{
+        guard t.isFinite,w.x.isFinite,w.y.isFinite,w.z.isFinite else{return []}
+        if let last=recent.last,t<=last.t{return []}
+        let previous=recent.last
+        recent.append((t,w))
+        while let first=recent.first,t-first.t>Self.calmFrom+0.05{recent.removeFirst()}
+        let speed=Self.length(w)
+        if holding{
+            if speed<Self.releaseRate{if calmSince==nil{calmSince=t}}else{calmSince=nil}
+            if let calmSince,t-calmSince>=Self.releaseFor{holding=false;self.calmSince=nil;return [.release]}
+            if t-clickedAt>=Self.longestHold{holding=false;calmSince=nil;return [.release]}
+            return []
+        }
+        if var pending=candidate{
+            if speed>pending.peak,t-pending.peakAt<=Self.peakWithin{
+                pending.peak=speed;pending.peakAt=t;pending.peakW=w;candidate=pending;return []
+            }
+            if speed<=Self.narrow*pending.peak{
+                candidate=nil
+                let way=Self.unit(pending.peakW),alignment=(way*direction).sum()
+                if pending.along,alignment>=Self.minimumAlignment{
+                    if alignment>=Self.adaptAlignment{direction=Self.unit(direction*(1-Self.adaptRate)+way*Self.adaptRate)}
+                    strays=[];return click(at:t,since:pending.since,peak:pending.peak)
+                }
+                // A firm, narrow jolt the wrong way: a press if the next ones agree.
+                if pending.rise>=Self.relearnJump{
+                    strays=strays.filter{t-$0.t<=Self.relearnWithin};strays.append((t,way))
+                    let agreeing=strays.filter{($0.way*way).sum()>=Self.relearnAgreement}
+                    if agreeing.count>=Self.relearnCount{
+                        direction=Self.unit(agreeing.reduce(SIMD3<Double>(repeating:0)){$0+$1.way});strays=[]
+                        return click(at:t,since:pending.since,peak:pending.peak)
+                    }
+                }
+                return [.release]
+            }
+            if t-pending.peakAt>Self.peakWithin{candidate=nil;return [.release]}
+            return []
+        }
+        guard let previous,t-clickedAt>=Self.refractory,t-previous.t<=Self.longestStep else{return []}
+        let before=recent.filter{t-$0.t>=Self.calmTo && t-$0.t<=Self.calmFrom}.map{Self.length($0.w)}
+        guard before.count>=Self.calmReadings,let calmest=before.max(),calmest<=Self.calmRate else{return []}
+        let last=Self.length(previous.w),along=(w*direction).sum()-(previous.w*direction).sum(),rise=speed-last
+        guard along>=Self.clickJump || rise>=Self.relearnJump else{return []}
+        // The jolt's peak can be the reading before, when it set off another way.
+        let lead=last>speed
+        candidate=(since:previous.t,peak:max(speed,last),peakAt:lead ? previous.t:t,peakW:lead ? previous.w:w,rise:rise,along:along>=Self.clickJump)
+        return [.hold(since:previous.t)]
+    }
+    private mutating func click(at t:Double,since:Double,peak:Double)->[ClosedCaseTapDetector.Event]{
+        holding=true;clickedAt=t;calmSince=nil
+        return [.tap(since:since,jolt:peak/100,repeated:false)]
+    }
+}
+
+// AirPods 4 clicks: a press on the front of the case, or a twist. A firm press is also a quick little twist, so both can
+// see one gesture: whichever claims it first clicks, and the other is ignored until the pointer is let go, so a gesture
+// clicks once. A twist that clicks while a press is still being judged takes over the press's hold.
+struct ClosedCaseHeadTrackingClicks {
+    static let refractory=0.25
+    var press=ClosedCasePressDetector(),twist=ClosedCaseTwistDetector()
+    private var holder:Int?,provisional=false,lastClick = -Double.infinity
+
+    mutating func reset()->[ClosedCaseTapDetector.Event]{
+        _=press.reset();_=twist.reset()
+        let held=holder != nil;holder=nil;provisional=false
+        return held ? [.release]:[]
+    }
+    // Motion rows as the helper writes them, one gyroscope reading at a time to both detectors.
+    mutating func feed(_ rows:[[Double]])->[ClosedCaseTapDetector.Event]{
+        var events:[ClosedCaseTapDetector.Event]=[]
+        for row in rows.filter({$0.count==7 && $0[1]==12}).sorted(by:{$0[2]<$1[2]}){
+            let t=row[2]*1e-6
+            let heard=press.feed([row]).map{(0,$0)}+twist.feed([row]).map{(1,$0)}
+            for (source,event) in heard{
+                switch event{
+                case .hold:
+                    if holder==nil,t-lastClick>=Self.refractory{holder=source;provisional=true;events.append(event)}
+                case .tap:
+                    if holder==nil || holder==source || provisional,t-lastClick>=Self.refractory{
+                        holder=source;provisional=false;lastClick=t;events.append(event)
+                    }
+                case .release:
+                    if holder==source{holder=nil;provisional=false;events.append(event)}
+                }
+            }
+        }
+        return events
+    }
+}
+
+func runClosedCasePressChecks() throws {
+    let d=ClosedCasePressDetector.pressDirection,side=ClosedCasePressDetector.unit(SIMD3(1,0,0)-d*d.x),calm=SIMD3(2.0,-1.5,1.0)
+    // Gyroscope rows every `period` seconds (100 a second unless given) from sensor second 1000, leaving out what `skip` says.
+    func motion(_ seconds:Double,period:Double=0.01,skip:(Double)->Bool={_ in false},_ rate:(Double)->SIMD3<Double>)->[[Double]]{
+        (0..<Int((seconds/period).rounded())).map{Double($0)*period}.filter{!skip($0)}.map{t in
+            let w=rate(t)
+            return [0,12,1e9+t*1e6,0,w.x*1e5,w.y*1e5,w.z*1e5]
+        }
+    }
+    // A press at `at`: one fast reading along `way`, a fifth of that the next, then a slow spring back.
+    func press(_ t:Double,at:Double,size:Double=140,way:SIMD3<Double>=d,period:Double=0.01)->SIMD3<Double>?{
+        let k=Int(((t-at)/period).rounded())
+        return k==0 ? way*size:k==1 ? way*(size*0.2):(2...16).contains(k) ? way*(-size*0.08):nil
+    }
+    func presses(_ times:[Double],size:Double=140,way:SIMD3<Double>=d,period:Double=0.01,seconds:Double=3)->[[Double]]{
+        motion(seconds,period:period){t in times.lazy.compactMap{press(t,at:$0,size:size,way:way,period:period)}.first ?? calm}
+    }
+    func replay(_ rows:[[Double]],batch:Int=5)->[ClosedCaseTapDetector.Event]{
+        var detector=ClosedCasePressDetector(),events:[ClosedCaseTapDetector.Event]=[],index=0
+        while index<rows.count{events+=detector.feed(Array(rows[index..<min(rows.count,index+batch)]));index+=batch}
+        return events+detector.reset()
+    }
+    func clicks(_ rows:[[Double]],axis:SIMD3<Double>?)->[ClosedCaseTapDetector.Event]{
+        var clicks=ClosedCaseHeadTrackingClicks(),events:[ClosedCaseTapDetector.Event]=[],index=0
+        clicks.twist.axis=axis
+        while index<rows.count{events+=clicks.feed(Array(rows[index..<min(rows.count,index+5)]));index+=5}
+        return events+clicks.reset()
+    }
+    func taps(_ events:[ClosedCaseTapDetector.Event])->[Double]{events.compactMap{if case .tap(let since,_,_)=$0{return since};return nil}}
+    // A hold or a click holds the pointer, a click can follow a hold, and the pointer is always let go.
+    func balanced(_ events:[ClosedCaseTapDetector.Event])->Bool{
+        var held=false,clicked=false
+        for event in events{
+            switch event{
+            case .hold:if held{return false};held=true;clicked=false
+            case .tap:if clicked{return false};held=true;clicked=true
+            case .release:if !held{return false};held=false;clicked=false
+            }
+        }
+        return !held
+    }
+    let one=replay(presses([1]))
+    guard one.count==3,case .hold(let held)=one[0],abs(held-1000.99)<1e-6,taps(one).count==1,abs(taps(one)[0]-1000.99)<1e-6,one.last == .release else{
+        throw LessonError.message("A press from a still case must hold the pointer at once, click where it was before, then let go: \(one).")
+    }
+    for batch in [1,3,7,50] where replay(presses([1]),batch:batch) != one{throw LessonError.message("A press must click the same however the readings are batched.")}
+    guard taps(replay(presses([1],size:45))).count==1,replay(presses([1],size:35)).isEmpty else{throw LessonError.message("A press must speed the case up by 40°/s along the press direction to click.")}
+    guard taps(replay(presses([1,1.6]))).count==2,taps(replay(presses([1,1.15]))).count==1 else{throw LessonError.message("Presses must click once each, and not twice within a quarter second.")}
+    guard taps(replay(presses([1],period:0.02))).count==1,taps(replay(presses([1],period:0.04))).isEmpty else{throw LessonError.message("A press must click at 50 readings a second and not at 25.")}
+    let moving=replay(motion(2){t in (press(t,at:1) ?? .zero)+side*60})
+    let afterAiming=replay(motion(2){t in t<0.8 ? side*100:press(t,at:1) ?? calm})
+    guard moving.isEmpty,taps(afterAiming).count==1 else{throw LessonError.message("A press must come from a still case, which can have just stopped aiming.")}
+    let aiming=replay(motion(2){t in t<1 ? calm:d*min(250,30*((t-1)/0.01).rounded()+30)})
+    let sideways=replay(presses([1],way:side)),slow=replay(motion(2){t in t>=1 && t<1.06 ? d*140:calm})
+    // A recorded handling jolt set off sideways and only then turned partly along the press direction.
+    let swerved=replay(motion(2){t in abs(t-1)<0.005 ? side*80:abs(t-1.01)<0.005 ? d*45+side*20:calm})
+    guard aiming.isEmpty,taps(sideways).isEmpty,balanced(sideways),taps(slow).isEmpty,balanced(slow),!slow.isEmpty,
+          !swerved.isEmpty,taps(swerved).isEmpty,balanced(swerved) else{
+        throw LessonError.message("Aiming, a jolt from another direction and a slow turn must not click, and a hold must be let go.")
+    }
+    guard replay(motion(2,skip:{$0>=1 && $0<1.3}){t in press(t,at:1.3) ?? calm}).isEmpty else{throw LessonError.message("A press right after a gap in the readings can't be judged.")}
+    let stirred=replay(motion(2){t in press(t,at:1) ?? (t>1 ? side*50:calm)})
+    guard taps(stirred).count==1,stirred.last == .release,balanced(stirred) else{throw LessonError.message("A click must let the pointer go even if the case keeps moving.")}
+    var learner=ClosedCasePressDetector(),learned:[ClosedCaseTapDetector.Event]=[]
+    for row in presses([1,2,3,4],way:side,seconds:5){learned+=learner.feed([row])}
+    guard taps(learned).map({($0-1000).rounded()}) == [3,4],((learner.direction*side).sum())>0.99,balanced(learned+learner.reset()) else{
+        throw LessonError.message("Three firm presses that agree must teach a new press direction, and the third must click: \(taps(learned)).")
+    }
+    for events in [replay(presses([1,2],size:200)),clicks(presses([1,2],size:200),axis:d),clicks(presses([1,2],size:200),axis:nil)]{
+        guard taps(events).count==2,balanced(events) else{throw LessonError.message("A press must click once, even when it's also a twist: \(events).")}
+    }
+    let twisted=clicks(motion(2){t in t>=1 && t<1.25 ? d*min(200,50*((t-1)/0.01).rounded()+50):calm},axis:d)
+    guard taps(twisted).count==1,balanced(twisted),taps(clicks(motion(2){t in t>=1 && t<1.25 ? side*200:calm},axis:d)).isEmpty else{
+        throw LessonError.message("A twist must still click once, and a turn that isn't one must not: \(twisted).")
+    }
+    print("PASS: AirPods 4 press clicks: a press clicks once at 50 and 100 readings a second, holding the pointer from its start; aiming, other jolts, slow turns and gaps don't; a new press direction is learned on the third press; a press that is also a twist clicks once")
 }

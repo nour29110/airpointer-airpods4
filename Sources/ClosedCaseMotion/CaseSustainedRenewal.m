@@ -266,12 +266,17 @@ static NSString *hexString(NSData *data) {
     const uint8_t *r=report.bytes;
     uint64_t nanoseconds=le32(r+1) | (uint64_t)le32(r+5)<<32,stamp=nanoseconds/1000;
     if(!stamp) return;
+    // Until the earbud's own fusion starts, its orientation reads exactly zero, and its very first report has no
+    // accelerometer reading either. Such a report reads no turn, and the first real orientation after it starts afresh
+    // rather than reading as a turn of thousands of degrees a second from nowhere.
+    BOOL unstarted=!(r[20] | r[21] | r[22] | r[23] | r[24] | r[25]);
+    if(unstarted && !(r[44] | r[45] | r[46] | r[47] | r[48] | r[49])) {self.hasHead=NO;return;}
     double v[3],n=0;
     for(int i=0;i<3;i++) {v[i]=(int16_t)(r[20+2*i] | r[21+2*i]<<8)/32767.0;n+=v[i]*v[i];}
     double q[4]={sqrt(n<1?1-n:0),v[0],v[1],v[2]},length=sqrt(q[0]*q[0]+n);
     for(int i=0;i<4;i++) q[i]/=length;
     double rate[3]={0,0,0};
-    if(self.hasHead && stamp>self.headStamp && stamp-self.headStamp>=2000 && stamp-self.headStamp<=200000) {
+    if(!unstarted && self.hasHead && stamp>self.headStamp && stamp-self.headStamp>=2000 && stamp-self.headStamp<=200000) {
         // d = previous^-1 * q: the turn since the previous report, in the body frame.
         double p[4]={self.headW,-self.headX,-self.headY,-self.headZ};
         double d[4]={p[0]*q[0]-p[1]*q[1]-p[2]*q[2]-p[3]*q[3],
@@ -282,7 +287,7 @@ static NSString *hexString(NSData *data) {
         double s=sqrt(d[1]*d[1]+d[2]*d[2]+d[3]*d[3]),seconds=(stamp-self.headStamp)*1e-6;
         if(s>1e-12) for(int i=0;i<3;i++) rate[i]=d[i+1]/s*2*atan2(s,d[0])/seconds*180/M_PI;
     }
-    self.hasHead=YES;self.headStamp=stamp;self.headW=q[0];self.headX=q[1];self.headY=q[2];self.headZ=q[3];
+    self.hasHead=!unstarted;self.headStamp=stamp;self.headW=q[0];self.headX=q[1];self.headY=q[2];self.headZ=q[3];
     int32_t a[3];
     for(int i=0;i<3;i++) a[i]=(int32_t)lround((int16_t)(r[44+2*i] | r[45+2*i]<<8)*100000.0/1024);
     [self recordService:11 stamp:stamp x:a[0] y:a[1] z:a[2]];
@@ -1369,6 +1374,13 @@ static void headAdapterChecks(void) {
     check(fabs(sqrt(ax*ax+ay*ay+az*az)*1e-5-1)<0.02,@"the AirPods 4 accelerometer reads 1 g at rest");
     check(sqrt(gx*gx+gy*gy+gz*gz)*1e-5<3,@"a resting AirPods 4 earbud reads almost no turning");
     check([accel[@"sensor_us"] unsignedLongLongValue]==14378688021ULL && [gyro[@"sensor_us"] unsignedLongLongValue]==14378688022ULL,@"AirPods 4 nanoseconds become the raw stream's microseconds");
+    // As an earbud sends them before its fusion starts: the first with nothing, then ones with no orientation yet.
+    NSData *empty=hexData("04000400170000001000450008ff7f10013a3e08101a3a015021d8c7130d0000030043998d62bb000000000000000000000300020001005e1003d37706fdff0000010000000000000034aac63786ff0000");
+    NSData *unstarted=hexData("04000400170000001000450008ff7f10013a3e08101a3a015021d8c7130d0000030043998d62bb000000000000000000000300020001005e1003d37706fdff000001008d020d035c0034aac63786ff0000");
+    ConsoleReader *starting=ConsoleReader.new;starting.adaptHead=YES;feedReader(starting,empty);
+    check(starting.headReports==1 && starting.accelReports==0 && starting.gyroReports==0,@"an AirPods 4 report with no orientation or accelerometer reading is left out");
+    feedReader(starting,unstarted);feedReader(starting,second);
+    check(starting.accelReports==2 && starting.gyroReports==2 && [starting.lastSamples[@"12"][@"x"] doubleValue]==0 && [starting.lastSamples[@"12"][@"y"] doubleValue]==0 && [starting.lastSamples[@"12"][@"z"] doubleValue]==0,@"the first real AirPods 4 orientation after an unstarted one reads no turn");
 }
 static void caseAsideChecks(void) {
     CaseSnapshot *snapshot=CaseSnapshot.new;
