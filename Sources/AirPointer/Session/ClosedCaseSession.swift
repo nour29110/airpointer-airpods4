@@ -520,6 +520,8 @@ final class ClosedCaseSession: NSObject {
     private var pointerFilter=ClosedCasePointerFilter()
     // AirPods 4: the helper streams head tracking as raw motion (--head-tracking). The right ⌥ key also clicks.
     private var headTracking=false,clickKeyMonitor:Any?,twistDetector=ClosedCaseTwistDetector()
+    // AirPods 4: set once the lid closes while pointing, when the helper starts talking to the case.
+    private var caseWindowOpened=false
     private var readStats=(count:0,total:0.0,longest:0.0,since:0.0)
     private var tapDetector=ClosedCaseTapDetector(),recentPoints:[(t:Double,point:CGPoint)]=[],tapHold:CGPoint?
     private var lastClick:(uptime:Double,position:CGPoint,count:Int64)?
@@ -629,10 +631,12 @@ final class ClosedCaseSession: NSObject {
         guard !confirmed,ready,let capture else{return}
         do{
             closedAt=ProcessInfo.processInfo.systemUptime
-            try Data("closed_confirmed\n".utf8).write(to:capture.appendingPathComponent("phase.txt"),options:.atomic)
-            step("lid closed");confirmed=true;ready=false
+            // AirPods 4 point with the lid open, so the case conversation waits until the lid really closes (readStatus).
+            if !headTracking{try Data("closed_confirmed\n".utf8).write(to:capture.appendingPathComponent("phase.txt"),options:.atomic)}
+            step(headTracking ? "pointing with the lid open":"lid closed");confirmed=true;ready=false
             motion?.resetGrip(keepingEdges:true);calibrated=false;smooth=CGPoint(x:0.5,y:0.5);setAim(smooth)
-            turned=false;uprightSince=nil;settle=nil
+            // Turning upright marks picking up a closed case; an open AirPods 4 case is already in hand.
+            turned=headTracking;uprightSince=nil;settle=nil
             closedGravity=motion?.accelVector
             heldGravity=motion?.gripGravity
             pointerFilter=ClosedCasePointerFilter()
@@ -685,7 +689,7 @@ final class ClosedCaseSession: NSObject {
         }
         do{
             watchClickKey()
-            try resetFusion();confirmed=false;connected=false;ready=false;stopping=false;closedAt=0;stoppedAt=0;userEnded=false;hasPointed=false;pause()
+            try resetFusion();confirmed=false;connected=false;ready=false;caseWindowOpened=false;stopping=false;closedAt=0;stoppedAt=0;userEnded=false;hasPointed=false;pause()
             startedAt=ProcessInfo.processInfo.systemUptime
             if let activity{ProcessInfo.processInfo.endActivity(activity)}
             activity=ProcessInfo.processInfo.beginActivity(options:[.userInitiatedAllowingIdleSystemSleep,.latencyCritical],reason:"Receive AirPods pointer motion")
@@ -790,9 +794,17 @@ final class ClosedCaseSession: NSObject {
         ready = !stopping && !confirmed && connected && (state["open_baseline_verified"] as? Bool == true) && 
             (cs["root_identity_verified"] as? Bool == true)
         if ready && !loggedReady{loggedReady=true;step("close lid shown")}
-        // AirPods 4 point with the lid open (closing it ends their connection), so they don't wait for it to close.
+        // AirPods 4 point with the lid open, so they start without waiting for it to close.
         if ready,helper?.isRunning == true,headTracking || closedCaseLidClosed(closedCaseInCaseReports(state["earbud_state_events"])){
             confirmClosed()
+        }
+        // AirPods 4: once the lid closes, ask the helper to keep the closed case awake the way it does for AirPods Pro.
+        // In-case reports from the first seconds are skipped: AirPods 4 send a burst at connect that can read as a close.
+        if headTracking,confirmed,!caseWindowOpened,helper?.isRunning == true,
+           closedCaseLidClosed(closedCaseInCaseReports(state["earbud_state_events"]).filter({$0.uptime>closedAt+3})){
+            caseWindowOpened=true
+            try? Data("closed_confirmed\n".utf8).write(to:capture.appendingPathComponent("phase.txt"),options:.atomic)
+            step("lid closed")
         }
         if !stopping && confirmed{
             held=cs["case_identity_verified"] as? Bool == true || (connected && ProcessInfo.processInfo.systemUptime-closedAt>=2)

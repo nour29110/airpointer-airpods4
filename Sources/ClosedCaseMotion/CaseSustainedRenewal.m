@@ -110,6 +110,9 @@ static const HelperExitInfo *helperExitInfo(int code) {
 }
 
 static BOOL motionOnStdout=NO;
+// --head-tracking (the app passes it for AirPods 4): stream service 16 instead of the raw sensors, accept the
+// AirPods 4 case's own name, and never let the case end a session (see setCaseAsideIfCaseFailure).
+static BOOL headTrackingMode=NO;
 // Session stdout is a bounded OS pipe carrying only motion rows.
 #define printf(...) fprintf(motionOnStdout ? stderr : stdout, __VA_ARGS__)
 #define puts(message) fprintf(motionOnStdout ? stderr : stdout,"%s\n",message)
@@ -529,6 +532,12 @@ static BOOL sessionLeaseFresh(NSURL *url,double now) {
     return text.length>0 && isfinite(stamp) && stamp>0 && now>=stamp-.5 && now-stamp<5;
 }
 static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1:current+1;}
+// A failure raised by the case conversation: its identity, its diagnostic request, its announcements and replies.
+static BOOL isCaseFailureReason(NSString *reason) {
+    for(NSString *word in @[@"case",@"MTIC",@"endpoint",@"downstream",@"startup VERSION",@"root discovery response"])
+        if([reason rangeOfString:word].location!=NSNotFound) return YES;
+    return NO;
+}
 @interface CaseSnapshot : NSObject
 @property NSOutputStream *output;
 @property NSMutableSet<NSNumber *> *announced,*caseResponseIDs;
@@ -544,6 +553,8 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
 @property double lastSolicitationAt;
 @property NSString *rootIdentity,*caseIdentity,*error,*pending;
 @property int failure; // Exit code paired with the first error; see the table at the top.
+@property BOOL caseAside; // AirPods 4: the case would not keep the closed lid awake; the session runs on without it.
+@property NSString *caseAsideReason;
 @property double rootModelSince,nextCaseVersionAt,pendingSince;
 @property double metadataDrainSince,offerWaitSince;
 @property double nextActiveIdentityAt;
@@ -560,7 +571,18 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
 // cleanup problem) must not replace the cause the app and exit code report.
 - (void)fail:(int)code reason:(NSString *)reason {
     if(self.error) return;
+    if(self.caseAside && isCaseFailureReason(reason)) {printf("AirPods 4: case set aside, ignoring: %s\n",reason.UTF8String);return;}
     self.error=reason;self.failure=code;
+}
+// AirPods 4 point with the lid open, so a case that won't keep the closed lid awake (a name, timing or diagnostic
+// request the AirPods Pro case handles differently) must not end the session. Its failure sets it aside instead:
+// nothing more is sent to it except the release of an asset it already gave, its frames are ignored, and the
+// session runs on motion alone. If the lid then closes, the link drops and the app reconnects once it opens.
+- (BOOL)setCaseAsideIfCaseFailure {
+    if(!self.error || self.caseAside || !self.rootVerified || !isCaseFailureReason(self.error)) return NO;
+    printf("AirPods 4: the case can't keep the closed lid awake (%s); pointing carries on with the lid open\n",self.error.UTF8String);
+    self.caseAsideReason=self.error;self.caseAside=YES;self.error=nil;self.failure=0;self.pending=nil;
+    return YES;
 }
 - (BOOL)maySolicitAt:(double)now {
     if(!self.solicitationAttempted) return YES;
@@ -594,6 +616,7 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
     if(!self.budgetStartedAt || now-self.budgetStartedAt>=60){self.budgetStartedAt=now;self.windowRequests=0;self.windowBytes=0;}
     NSUInteger requests=self.windowRequests,usedBytes=self.windowBytes,requestLimit=120,byteLimit=4096;
     if(!self.closedWindowStarted) return NO;
+    if(self.caseAside && type!=9) return NO;
     if(!self.targetBound || !self.rootVerified || !self.caseActive || ![self.announced containsObject:@1] ||
        requests>=requestLimit || usedBytes+bytes>byteLimit || self.unconfirmedBytes+bytes>112) return NO;
     if(type==9) return self.cleanupStarted && self.accepted && !self.cleanupSent && body.length==4 && be16(b)==self.assetID && be16(b+2)==3;
@@ -652,7 +675,7 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
         if(!earbudModelMatches(self.rootIdentity)) {[self fail:HelperExitWrongEarbudModel reason:[NSString stringWithFormat:@"earbud reported ModelName \"%@\"",self.rootIdentity]];return;}self.rootVerified=YES;return;
     }
     if(type!=0x1b) return;if(n<8) {[self fail:HelperExitUnexpectedReply reason:@"short downstream envelope"];return;}if(be16(b+6)!=1) return;
-    if(!self.caseActive || ![self.announced containsObject:@1]) return;
+    if(!self.caseActive || ![self.announced containsObject:@1] || (self.caseAside && !self.cleanupSent)) return;
     const uint8_t *inner=b+8;uint16_t it=be16(inner),in=be16(inner+2),identifier=be16(inner+4);
     if((NSUInteger)n!=(NSUInteger)in+8) {[self fail:HelperExitUnexpectedReply reason:@"malformed case inner frame"];return;}
     NSData *body=[NSData dataWithBytes:inner+6 length:in];const uint8_t *v=body.bytes;
@@ -692,7 +715,8 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
     } else if(it==4 && self.caseModelSent && !self.caseModelVerified) {
         if((![self.pending isEqual:@"model"] || self.modelSentAfterVersionFrames!=self.caseVersionFrames)) {[self fail:HelperExitUnexpectedReply reason:@"case identity reply did not match the ordered setup query"];return;}
         self.caseIdentity=modelName(body);
-        if(!chargingCaseModelMatches(self.caseIdentity)) {[self fail:HelperExitWrongCaseModel reason:[NSString stringWithFormat:@"case reported ModelName \"%@\"",self.caseIdentity]];return;}
+        if(headTrackingMode) printf("AirPods 4: case reported ModelName \"%s\"\n",self.caseIdentity.UTF8String);
+        else if(!chargingCaseModelMatches(self.caseIdentity)) {[self fail:HelperExitWrongCaseModel reason:[NSString stringWithFormat:@"case reported ModelName \"%@\"",self.caseIdentity]];return;}
         self.caseModelVerified=YES;self.pending=nil;self.unconfirmedBytes=self.unconfirmedBytes>=10?self.unconfirmedBytes-10:0;
         self.caseRouteDrained=self.caseVersionReplies==self.caseVersionFrames;
         if(self.caseRouteDrained) self.unconfirmedBytes=0;
@@ -702,14 +726,14 @@ static uint16_t nextIdentifier(uint16_t current) {return current==UINT16_MAX ? 1
         }
     } else if(it==4 && self.caseModelVerified && [self.pending isEqualToString:@"identity_refresh"]) {
         NSString *refreshed=modelName(body);
-        if(!chargingCaseModelMatches(refreshed) || (self.caseIdentity.length && ![foldedModelName(refreshed) isEqualToString:foldedModelName(self.caseIdentity)])) {[self fail:HelperExitWrongCaseModel reason:@"case identity refresh did not match the identified case"];return;}
+        if((!headTrackingMode && !chargingCaseModelMatches(refreshed)) || (self.caseIdentity.length && ![foldedModelName(refreshed) isEqualToString:foldedModelName(self.caseIdentity)])) {[self fail:HelperExitWrongCaseModel reason:@"case identity refresh did not match the identified case"];return;}
         self.identityRefreshReplies++;self.pending=nil;self.unconfirmedBytes=self.startupUnknownBytes;
     } else if(it==4 && self.caseModelVerified && !self.pending) {
         puts("Late case identity reply ignored");
     } else [self fail:HelperExitUnexpectedReply reason:@"unexpected case response for pending request"];
 }
 - (void)tick:(double)now {
-    if(self.cleanupStarted || self.error) return;
+    if(self.cleanupStarted || self.error || self.caseAside) return;
     // A pointer session runs on motion, and going stale ends it anyway. So a missed identity reply just gets asked again.
     if([self.pending isEqualToString:@"identity_refresh"] && now-self.pendingSince>=5) {
         self.missedReplies++;self.pending=nil;self.unconfirmedBytes=self.startupUnknownBytes;
@@ -794,8 +818,6 @@ static NSData *varintData(uint32_t value) {
 // The sequence carries on across sessions, so it lives in the app's data folder,
 // beside the target file rather than wherever the helper happened to be started.
 static NSString *sensorSequencePath=nil;
-// --head-tracking (the app passes it for AirPods 4): stream service 16 instead of the raw sensors.
-static BOOL headTrackingMode=NO;
 // Fastest first, ending at the 25 Hz that every head-tracking client uses.
 static const uint32_t headIntervals[]={10000,20000,40000};
 static const NSUInteger headIntervalCount=3;
@@ -944,6 +966,7 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
             }
         }
         [reader.uarpMessages removeAllObjects];processed=0;
+        if(headTrackingMode) [transfer setCaseAsideIfCaseFailure];
         now=NSProcessInfo.processInfo.systemUptime;
         if(motionInputVerified) {
             BOOL fresh=YES;
@@ -953,13 +976,12 @@ static int runPointerSession(CBL2CAPChannel *channel, NSURL *directory) {
             }
             if(!fresh) {[transfer fail:HelperExitMotionStale reason:@"Motion stopped arriving"];reason=transfer.error;break;}
         }
-        // AirPods 4 point with the lid open and stay connected on their own, so in head-tracking mode nothing
-        // is sent to the case: without discovery its endpoint is never announced, identified or asked for records.
-        if(transfer.rootVerified && !discoverySent && !headTrackingMode) {
+        if(transfer.rootVerified && !discoverySent) {
             discoverySent=[transfer sendRoot:0x15 body:NSData.data];
             if(!discoverySent) [transfer fail:HelperExitWriteFailed reason:@"root discovery write failed"];
         }
         [transfer tick:now];
+        if(headTrackingMode) [transfer setCaseAsideIfCaseFailure];
         {
             BOOL fresh=YES;
             for(NSNumber *service in @[@11,@12]) {
@@ -1348,9 +1370,27 @@ static void headAdapterChecks(void) {
     check(sqrt(gx*gx+gy*gy+gz*gz)*1e-5<3,@"a resting AirPods 4 earbud reads almost no turning");
     check([accel[@"sensor_us"] unsignedLongLongValue]==14378688021ULL && [gyro[@"sensor_us"] unsignedLongLongValue]==14378688022ULL,@"AirPods 4 nanoseconds become the raw stream's microseconds");
 }
+static void caseAsideChecks(void) {
+    CaseSnapshot *snapshot=CaseSnapshot.new;
+    [snapshot fail:HelperExitWrongCaseModel reason:@"case reported ModelName \"X\""];
+    check(![snapshot setCaseAsideIfCaseFailure] && snapshot.error,@"a case failure before the earbud is verified still ends the session");
+    snapshot=CaseSnapshot.new;snapshot.rootVerified=YES;
+    [snapshot fail:HelperExitCaseDeclined reason:@"case diagnostic request declined (reason 1)"];
+    check([snapshot setCaseAsideIfCaseFailure] && snapshot.caseAside && !snapshot.error && snapshot.failure==0,@"an AirPods 4 case failure sets the case aside and the session carries on");
+    [snapshot fail:HelperExitCaseLost reason:@"announced case became unreachable"];
+    check(!snapshot.error,@"later case problems are ignored once the case is set aside");
+    const uint8_t version[]={0,7};
+    CaseSnapshot *listening=CaseSnapshot.new;listening.rootVerified=YES;listening.targetBound=YES;listening.caseActive=YES;listening.closedWindowStarted=YES;[listening.announced addObject:@1];
+    snapshot.targetBound=YES;snapshot.caseActive=YES;snapshot.closedWindowStarted=YES;[snapshot.announced addObject:@1];
+    check([listening canSendChild:1 body:packet(version,2)] && ![snapshot canSendChild:1 body:packet(version,2)],@"nothing more is sent to a case set aside");
+    [snapshot fail:HelperExitMotionStale reason:@"Motion stopped arriving"];
+    check(snapshot.error && snapshot.failure==HelperExitMotionStale && ![snapshot setCaseAsideIfCaseFailure],@"losing motion still ends the session");
+    check(!isCaseFailureReason(@"earbud reported ModelName \"AirPods 4\"") && !isCaseFailureReason(@"root Model response timed out") && isCaseFailureReason(@"case model response timed out"),@"case failures are told apart from earbud ones");
+}
 static int offlineSelfTest(void) {
     sessionChecks();
     headAdapterChecks();
+    caseAsideChecks();
     hardeningChecks();
     ConsoleReader *sensorReader=ConsoleReader.new;sensorReader.motionStream=tmpfile();check(sensorReader.motionStream!=NULL,@"offline sensor stream opened");testSensorWire(sensorReader,100);
     NSDictionary *firstSensor=sensorReader.lastSamples[@"11"];

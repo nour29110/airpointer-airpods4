@@ -24,12 +24,18 @@ AirPointer's own fusion integrates those rows back into the earbud's orientation
 
 AirPods 4 ignore a start they can't act on, so until reports arrive the helper asks again: first for 100 readings a second, then 50, then 25, then every 4 seconds.
 
-## Keep the lid open
+## The lid
 
-Closing the lid makes AirPods 4 end their connection. AirPointer keeps a closed AirPods Pro case awake by holding a transfer of the case's diagnostic records open, and the AirPods 4 case rejects that (its model check fails). With the lid open, AirPods 4 stay connected on their own, so for AirPods 4:
+**Open:** AirPods 4 stream from the open case and stay connected on their own. Pointing starts as soon as the motion and the earbuds are verified: there's no "close the lid" or "turn upright" step.
 
-- Pointing starts as soon as the motion and the earbuds are verified. There's no "close the lid" step.
-- The helper sends nothing to the case: no discovery, no model check, no diagnostic-record transfer. Your case's records are never used up.
+**Closed:** when the lid closes while you're pointing, AirPointer tries to keep the closed case awake the way it does for AirPods Pro. A closed case ends its link to the earbuds after 3.5 s of idle firmware-update traffic (UARP), so the helper asks the case for its diagnostic records (MTIC) and holds them, which keeps that traffic busy. Like AirPods Pro, this uses up the case's stored diagnostic records.
+
+The AirPods 4 case answers this only once the lid is closed, and it reports a different model name than the AirPods Pro case (the session log shows it). The rest of the exchange was tuned on the AirPods Pro 3 case, so it may not hold:
+
+- If the case cooperates and the earbuds keep streaming, pointing carries on with the lid closed. AirPods Pro sessions end about 30 minutes after the lid closes, and AirPods 4 likely do too.
+- If not, the case is set aside rather than ending the session, and the link drops when the lid closes. AirPointer then waits for the lid to open and reconnects by itself.
+
+The app ignores in-case reports from the first 3 seconds after connecting: AirPods 4 send a burst then that can read as a lid closing.
 
 ## Clicking: twist the case
 
@@ -49,5 +55,6 @@ Taps don't work on AirPods 4. Their readings are smoothed, and 25 to 100 a secon
 ## Notes
 
 - Tested on AirPods 4 with product ID `0x2019` and firmware 9A348. The service 16 format comes from the airpods-head-track and pods-head-tracker projects, which recorded it on AirPods 4, and from LibrePods.
-- From the original README's warnings, these still apply to AirPods 4: some connection settings stay as the session set them, and the Bluetooth link drops for a moment when connecting. The case's diagnostic records are not touched.
+- From the original README's warnings, these still apply to AirPods 4: some connection settings stay as the session set them, the Bluetooth link drops for a moment when connecting, and closing the lid uses up the case's diagnostic records.
+- `build.sh` resets AirPointer's Accessibility permission after every build, because each build is signed afresh and macOS's old grant no longer applies. Setup's Allow step asks again.
 - `HOLD` lines in a session's `native.log` show `ht=`, the number of head-tracking reports received.

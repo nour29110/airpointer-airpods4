@@ -45,3 +45,7 @@ AirPointer.app/Contents/MacOS/AirPointer --self-test
 AirPointer.app/Contents/MacOS/AirPointer --check-closed-case-tap Tests/TapFixtures.csv
 # The motion helper's offline checks, including AirPods 4 head tracking decoded from recorded packets. No Bluetooth.
 AirPointer.app/Contents/Resources/ClosedCaseMotion.bin --self-test | tail -1
+# Each build is signed afresh, so macOS's previous Accessibility grant no longer applies to it. Clear the stale
+# entry so setup's Allow step asks again, instead of the list showing AirPointer as allowed when it isn't.
+tccutil reset Accessibility local.airpointer >/dev/null 2>&1 || true
+echo "Accessibility was reset for this build: allow AirPointer again when setup asks."
