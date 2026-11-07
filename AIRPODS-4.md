@@ -1,6 +1,6 @@
 # AirPods 4 support
 
-This branch lets AirPointer turn an **AirPods 4** case into a pointer, the same way it does with AirPods Pro. You don't need to change any AirPods settings. See `git diff main` for every line that changed.
+This version of [AirPointer](https://github.com/musubipapi/airpointer) by Andy Gao lets it turn an **AirPods 4** case into a pointer, the same way it does with AirPods Pro. You don't need to change any AirPods settings. The first commit here is the original AirPointer's code at its commit `a73cc79`, and every change for AirPods 4 comes after it.
 
 ## How it works
 

@@ -9,6 +9,11 @@
   Move the closed case to move the cursor. Tap its front to click.
 </p>
 
+> [!NOTE]
+> **This version adds AirPods 4.** AirPods 4 don't stream the raw motion that AirPods Pro do, so this version reads their head tracking and turns it into the same motion data. Point with the case, then close the lid if you like, and press the case's front to click. It's tested on one pair of AirPods 4 on one Mac. [AIRPODS-4.md](AIRPODS-4.md) explains how it works.
+>
+> The original AirPointer, for AirPods Pro, is [musubipapi/airpointer](https://github.com/musubipapi/airpointer) by Andy Gao.
+
 <p align="center">
   <img src="Assets/Readme/connect.gif" width="100%" alt="The connect steps: open the lid, close the lid, turn the case upright, and point">
 </p>
@@ -30,6 +35,8 @@
 |---|---|
 | AirPods Pro 3, macOS 26, Apple Silicon | Tested on one Mac with one pair |
 | AirPods Pro 2 | Recognized, not tested |
+| AirPods 4 | Tested on one Mac with one pair. See [AIRPODS-4.md](AIRPODS-4.md) |
+| AirPods 4 with Active Noise Cancellation | Recognized, not tested |
 | AirPods paired with your Mac | Required |
 | Xcode | Required to build |
 
@@ -71,6 +78,15 @@ The first time you open the app, setup has four steps.
    turn it upright.
 3. **Calibrate:** Point at three dots to show the app where your screen is.
 4. **Tap:** Tap the front of the case three times.
+
+**With AirPods 4:**
+
+- Connect with the lid open. Pointing starts once the motion checks out, with no
+  close or turn step. Once you're pointing, you can close the lid.
+- Skip the Tap step with **Skip for Now**.
+- To click, hold the case still for a moment, then press its front, where the
+  light is. A quick twist of the case, like turning a key, also clicks, and so does
+  the right ⌥ key.
 
 ## Use it
 
@@ -136,6 +152,7 @@ confirmed it yet.
 | The pointer stutters just after you connect | This is normal for about 20 seconds. |
 | "Set it down" takes a long time | Use a firm, flat surface and do not touch the case. |
 | Taps do not click | Go to Settings > Teach Tap. Do this again if you change how you hold the case. |
+| AirPods 4 presses do not click | Hold the case still for a moment before you press. If presses still don't click, press firmly three times in a row. The third press teaches the app your press. |
 
 ## How it works
 
@@ -187,6 +204,10 @@ flowchart LR
 If motion stops for less than two seconds, the pointer stops and then continues.
 If motion stops for longer, the pointer pauses and continues when motion returns.
 
+With AirPods 4, `ClosedCaseMotion` asks for head tracking instead and turns each
+report into the same motion data, and a press on the front of the case clicks. See
+[AIRPODS-4.md](AIRPODS-4.md).
+
 ## Project layout
 
 ```text
@@ -202,6 +223,7 @@ Tests/                 Recorded taps and handling for the tap check
 Assets/                Images, sounds and the 3D case model
 Scripts/               Make the case and README images
 Docs/                  The design system
+AIRPODS-4.md           How AirPods 4 support works
 build.sh               Builds AirPointer.app and runs the checks
 ```
 
